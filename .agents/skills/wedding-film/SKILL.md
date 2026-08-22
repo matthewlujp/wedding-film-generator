@@ -21,4 +21,3 @@ Pause for user confirmation before provider cost, forced canonical replacement, 
 ## Report
 
 Report the explicit workspace, exact command, changed canonical artifact (if any), warnings or partial failures, current layer states, and one next gate. Keep credential values and private Material contents out of the report.
-
