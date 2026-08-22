@@ -21,11 +21,21 @@ PARTIAL_OR_BUDGET_STOP = 2
 INTERRUPTED = 130
 
 
+def _workspace_hint() -> str:
+    arguments = sys.argv[1:]
+    for index, argument in enumerate(arguments):
+        if argument == "--project" and index + 1 < len(arguments):
+            return arguments[index + 1].replace("\n", "\\n").replace("\r", "\\r")
+        if argument.startswith("--project="):
+            return argument.partition("=")[2].replace("\n", "\\n").replace("\r", "\\r")
+    return "<unspecified>"
+
+
 class CliParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
         print(
-            "workspace=<unspecified> phase=cli artifact=<none> "
+            f"workspace={_workspace_hint()} phase=cli artifact=<none> "
             f"code=CLI_INPUT_INVALID message={message}",
             file=sys.stderr,
         )
@@ -71,9 +81,10 @@ def initialize(workspace: Path) -> int:
         _emit(workspace, "UNSAFE_DESTINATION", reason, stream=sys.stderr)
         return INVALID_OR_PREFLIGHT
 
-    workspace.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{workspace.name}.init-", dir=workspace.parent))
+    staging: Path | None = None
     try:
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{workspace.name}.init-", dir=workspace.parent))
         (staging / "runs" / "analysis").mkdir(parents=True)
         (staging / ".work" / "candidates").mkdir(parents=True)
         (staging / "renders").mkdir()
@@ -90,9 +101,17 @@ def initialize(workspace: Path) -> int:
             encoding="utf-8",
         )
         os.replace(staging, workspace)
+    except OSError:
+        _emit(
+            workspace,
+            "PROJECT_INIT_IO_ERROR",
+            "Project Workspace could not be initialized",
+            stream=sys.stderr,
+        )
+        return INVALID_OR_PREFLIGHT
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
     _emit(workspace, "PROJECT_INITIALIZED", "Project Workspace initialized")
     return SUCCESS

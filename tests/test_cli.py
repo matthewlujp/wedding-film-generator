@@ -84,6 +84,11 @@ def test_initialization_rejects_ambiguous_or_unsafe_destinations(tmp_path: Path)
     assert "UNSAFE_DESTINATION" in linked_destination.stderr
     assert marker.read_text(encoding="utf-8") == "untouched"
 
+    unknown_command = run_cli("--project", str(existing), "not-a-command")
+    assert unknown_command.returncode == 1
+    assert f"workspace={existing}" in unknown_command.stderr
+    assert "CLI_INPUT_INVALID" in unknown_command.stderr
+
 
 def test_initialization_rejects_a_destination_below_a_symlink_ancestor(
     tmp_path: Path,
@@ -265,6 +270,8 @@ def test_status_reports_stale_unvalidated_artifacts_and_missing_tools(
     assert payload["layers"]["semantic_catalog"]["reasons"][0]["code"] == (
         "SEMANTIC_CATALOG_VALIDATOR_UNAVAILABLE"
     )
+    assert "semantic_catalog" in payload["layers"]["storyboard"]["upstream_hashes"]
+    assert "catalog" not in payload["layers"]["storyboard"]["upstream_hashes"]
     assert payload["layers"]["rough_cut"]["state"] == "stale"
     assert not (complete_workspace / ".status").exists()
 

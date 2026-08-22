@@ -9,12 +9,7 @@ from typing import Any
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
-SUPPORTED_ADAPTERS = frozenset({"none", "fake", "openai"})
-ADAPTER_CREDENTIALS: dict[str, tuple[str, ...]] = {
-    "none": (),
-    "fake": (),
-    "openai": ("OPENAI_API_KEY",),
-}
+from wedding_film.adapters import is_supported_adapter
 
 
 @dataclass(frozen=True)
@@ -40,15 +35,6 @@ class ProjectConfig:
     vision: AdapterConfig
     narrative: AdapterConfig
     analysis_defaults: AnalysisDefaults
-
-
-def required_credentials(config: ProjectConfig) -> tuple[str, ...]:
-    selected = (config.vision.name, config.narrative.name)
-    return tuple(
-        dict.fromkeys(
-            variable for adapter in selected for variable in ADAPTER_CREDENTIALS[adapter]
-        )
-    )
 
 
 class ConfigProblem(Exception):
@@ -130,7 +116,7 @@ def _adapter(value: object, location: str) -> AdapterConfig:
     data = _mapping(value, location)
     _exact_fields(data, ("name", "model", "prompt_version"), location)
     name = _slug(data["name"], f"{location}.name")
-    if name not in SUPPORTED_ADAPTERS:
+    if not is_supported_adapter(name):
         raise ConfigProblem("CONFIG_UNKNOWN_ADAPTER", f"{location}.name is not supported")
     return AdapterConfig(
         name=name,

@@ -11,11 +11,11 @@ from typing import Literal, TypedDict, cast
 
 import yaml
 
+from wedding_film.adapters import required_credentials
 from wedding_film.config import (
     ConfigProblem,
     ProjectConfig,
     load_project_config,
-    required_credentials,
 )
 from wedding_film.workspace import unsafe_destination_reason
 
@@ -109,7 +109,7 @@ def _credentials_fact(config: ProjectConfig | None) -> Fact:
             ["process-environment"],
             phase="project",
         )
-    required = required_credentials(config)
+    required = required_credentials((config.vision.name, config.narrative.name))
     missing = [variable for variable in required if not os.environ.get(variable)]
     if missing:
         return _fact(
@@ -297,7 +297,8 @@ def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> b
                 "error",
                 "-count_frames",
                 "-show_entries",
-                "stream=codec_type,codec_name,width,height,pix_fmt,r_frame_rate,avg_frame_rate,nb_read_frames",
+                "format=format_name:stream=codec_type,codec_name,width,height,pix_fmt,"
+                "sample_aspect_ratio,r_frame_rate,avg_frame_rate,nb_read_frames",
                 "-of",
                 "json",
                 str(artifact),
@@ -312,6 +313,12 @@ def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> b
         return False
     if not isinstance(payload, dict):
         return False
+    format_value = payload.get("format")
+    if not isinstance(format_value, dict):
+        return False
+    format_name = format_value.get("format_name")
+    if not isinstance(format_name, str) or "mp4" not in format_name.split(","):
+        return False
     streams_value = payload.get("streams")
     if not isinstance(streams_value, list) or not all(
         isinstance(stream, dict) for stream in streams_value
@@ -319,8 +326,7 @@ def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> b
         return False
     streams = cast(list[dict[str, object]], streams_value)
     videos = [stream for stream in streams if stream.get("codec_type") == "video"]
-    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
-    if len(videos) != 1 or audios:
+    if len(streams) != 1 or len(videos) != 1:
         return False
     video = videos[0]
     return (
@@ -328,6 +334,7 @@ def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> b
         and video.get("width") == 1920
         and video.get("height") == 1080
         and video.get("pix_fmt") == "yuv420p"
+        and video.get("sample_aspect_ratio") == "1:1"
         and video.get("r_frame_rate") == "24/1"
         and video.get("avg_frame_rate") == "24/1"
         and video.get("nb_read_frames") == str(expected_frames)
@@ -429,7 +436,7 @@ def derive_status(workspace: Path) -> StatusPayload:
         "storyboard",
         "storyboard.yaml",
         {
-            "catalog": (catalog_path, catalog),
+            "semantic_catalog": (catalog_path, catalog),
             "story": (story_path, story),
             "script": (script_path, script),
         },
