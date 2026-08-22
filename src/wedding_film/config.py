@@ -10,6 +10,11 @@ import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 SUPPORTED_ADAPTERS = frozenset({"none", "fake", "openai"})
+ADAPTER_CREDENTIALS: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "fake": (),
+    "openai": ("OPENAI_API_KEY",),
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,15 @@ class ProjectConfig:
     vision: AdapterConfig
     narrative: AdapterConfig
     analysis_defaults: AnalysisDefaults
+
+
+def required_credentials(config: ProjectConfig) -> tuple[str, ...]:
+    selected = (config.vision.name, config.narrative.name)
+    return tuple(
+        dict.fromkeys(
+            variable for adapter in selected for variable in ADAPTER_CREDENTIALS[adapter]
+        )
+    )
 
 
 class ConfigProblem(Exception):

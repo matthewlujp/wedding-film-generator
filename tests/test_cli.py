@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -17,32 +16,6 @@ def run_cli(*args: str, env: dict[str, str] | None = None) -> subprocess.Complet
         text=True,
         env=env,
     )
-
-
-def sha256_reference(path: Path) -> str:
-    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
-
-
-VALID_STORY = """---
-schema_version: 1
-title: Test Wedding
-target_duration_seconds: 300
----
-
-## Intent
-
-Celebrate the couple.
-
-## Emotional Arc
-
-Anticipation becomes joy.
-
-## Moments
-
-### opening
-
-The day begins.
-"""
 
 
 def test_user_can_initialize_an_explicit_workspace_without_materials(tmp_path: Path) -> None:
@@ -64,8 +37,14 @@ def test_user_can_initialize_an_existing_empty_directory(tmp_path: Path) -> None
     workspace = tmp_path / "empty"
     workspace.mkdir()
 
+    before = run_cli("--project", str(workspace), "status", "--json")
+    before_payload = json.loads(before.stdout)
+
     result = run_cli("--project", str(workspace), "project", "init")
 
+    assert before_payload["safe_next_commands"] == [
+        f"wedding-film --project {workspace} project init"
+    ]
     assert result.returncode == 0, result.stderr
     assert (workspace / "project.yaml").is_file()
     assert not (workspace / "materials").exists()
@@ -253,12 +232,12 @@ def test_status_rejects_unknown_adapter_names(tmp_path: Path) -> None:
     assert configuration["reasons"][0]["code"] == "CONFIG_UNKNOWN_ADAPTER"
 
 
-def test_status_reports_stale_and_complete_with_warnings_from_artifacts(
+def test_status_reports_stale_unvalidated_artifacts_and_missing_tools(
     tmp_path: Path,
 ) -> None:
     stale_workspace = tmp_path / "stale"
     assert run_cli("--project", str(stale_workspace), "project", "init").returncode == 0
-    (stale_workspace / "story.md").write_text(VALID_STORY, encoding="utf-8")
+    (stale_workspace / "story.md").write_text("# Story\n", encoding="utf-8")
     stale = json.loads(
         run_cli("--project", str(stale_workspace), "status", "--json").stdout
     )
@@ -268,43 +247,8 @@ def test_status_reports_stale_and_complete_with_warnings_from_artifacts(
     complete_workspace = tmp_path / "complete"
     assert run_cli("--project", str(complete_workspace), "project", "init").returncode == 0
     (complete_workspace / "materials").mkdir()
-    catalog = complete_workspace / "catalog.jsonl"
-    story = complete_workspace / "story.md"
-    script = complete_workspace / "script.md"
-    storyboard = complete_workspace / "storyboard.yaml"
-    catalog.write_text("{}\n", encoding="utf-8")
-    story.write_text(VALID_STORY, encoding="utf-8")
-    script.write_text(
-        "---\n"
-        "schema_version: 1\n"
-        "title: Test Wedding\n"
-        "inputs:\n"
-        f"  story: {sha256_reference(story)}\n"
-        "---\n\n"
-        "## opening-card\n\n"
-        "type: card\n"
-        "story_moment: opening\n\n"
-        "Together.\n",
-        encoding="utf-8",
-    )
-    storyboard.write_text(
-        "schema_version: 1\n"
-        "output:\n"
-        "  width: 1920\n"
-        "  height: 1080\n"
-        "  fps: 24\n"
-        "inputs:\n"
-        f"  story: {sha256_reference(story)}\n"
-        f"  script: {sha256_reference(script)}\n"
-        f"  catalog: {sha256_reference(catalog)}\n"
-        "sequence:\n"
-        "  - item_id: opening\n"
-        "    type: card\n"
-        "    story_moment: opening\n"
-        "    duration_frames: 96\n"
-        "    script_block: opening-card\n",
-        encoding="utf-8",
-    )
+    for filename in ("catalog.jsonl", "story.md", "script.md", "storyboard.yaml"):
+        (complete_workspace / filename).write_text("present\n", encoding="utf-8")
     (complete_workspace / "renders" / "rough-cut.mp4").write_text(
         "not-a-real-movie-yet", encoding="utf-8"
     )
@@ -314,29 +258,15 @@ def test_status_reports_stale_and_complete_with_warnings_from_artifacts(
     )
     payload = json.loads(result.stdout)
 
-    assert result.returncode == 0
+    assert result.returncode == 1
     assert payload["prerequisites"]["ffmpeg"]["state"] == "missing"
     assert payload["prerequisites"]["ffprobe"]["state"] == "missing"
-    assert payload["layers"]["rough_cut"]["state"] == "complete-with-warnings"
-    assert payload["layers"]["rough_cut"]["warnings"][0]["code"] == "TOOLCHAIN_UNAVAILABLE"
+    assert payload["layers"]["semantic_catalog"]["state"] == "invalid"
+    assert payload["layers"]["semantic_catalog"]["reasons"][0]["code"] == (
+        "SEMANTIC_CATALOG_VALIDATOR_UNAVAILABLE"
+    )
+    assert payload["layers"]["rough_cut"]["state"] == "stale"
     assert not (complete_workspace / ".status").exists()
-
-    probed = run_cli("--project", str(complete_workspace), "status", "--json")
-    probed_payload = json.loads(probed.stdout)
-    assert probed.returncode == 1
-    assert probed_payload["layers"]["rough_cut"]["state"] == "invalid"
-    assert probed_payload["layers"]["rough_cut"]["reasons"][0]["code"] == (
-        "ROUGH_CUT_INVALID_MEDIA"
-    )
-
-    story.write_text(f"{VALID_STORY}\nChanged intent.\n", encoding="utf-8")
-    changed = json.loads(
-        run_cli("--project", str(complete_workspace), "status", "--json").stdout
-    )
-    assert changed["layers"]["script"]["state"] == "stale"
-    assert changed["layers"]["script"]["reasons"][0]["code"] == (
-        "SCRIPT_UPSTREAM_HASH_MISMATCH"
-    )
 
 
 def test_status_never_advertises_commands_missing_from_the_cli(tmp_path: Path) -> None:

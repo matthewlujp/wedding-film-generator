@@ -13,6 +13,7 @@ from typing import NoReturn, TextIO
 import yaml
 
 from wedding_film.status import write_status
+from wedding_film.workspace import unsafe_destination_reason
 
 SUCCESS = 0
 INVALID_OR_PREFLIGHT = 1
@@ -57,33 +58,6 @@ def _configuration(workspace: Path) -> dict[str, object]:
     }
 
 
-def _unsafe_destination(workspace: Path) -> str | None:
-    absolute = workspace.absolute()
-    if absolute == Path(absolute.anchor) or absolute == Path.home():
-        return "destination is a protected directory"
-
-    system_aliases = {Path("/etc"), Path("/tmp"), Path("/var")}
-    for ancestor in reversed(absolute.parents):
-        if ancestor.is_symlink() and ancestor not in system_aliases:
-            return "destination has a symbolic-link ancestor"
-
-    current = absolute
-    while not current.exists() and current != current.parent:
-        current = current.parent
-    if current.is_symlink():
-        return "destination has a symbolic-link ancestor"
-    if not current.is_dir():
-        return "destination parent is not a directory"
-
-    if workspace.is_symlink():
-        return "destination is a symbolic link"
-    if workspace.exists() and not workspace.is_dir():
-        return "destination is not a directory"
-    if workspace.exists() and any(workspace.iterdir()):
-        return "destination is not empty"
-    return None
-
-
 def _emit(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout) -> None:
     print(
         f"workspace={workspace} phase=project artifact=project.yaml code={code} message={message}",
@@ -92,7 +66,7 @@ def _emit(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdo
 
 
 def initialize(workspace: Path) -> int:
-    reason = _unsafe_destination(workspace)
+    reason = unsafe_destination_reason(workspace)
     if reason is not None:
         _emit(workspace, "UNSAFE_DESTINATION", reason, stream=sys.stderr)
         return INVALID_OR_PREFLIGHT

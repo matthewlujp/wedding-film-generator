@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -12,7 +11,13 @@ from typing import Literal, TypedDict, cast
 
 import yaml
 
-from wedding_film.config import ConfigProblem, ProjectConfig, load_project_config
+from wedding_film.config import (
+    ConfigProblem,
+    ProjectConfig,
+    load_project_config,
+    required_credentials,
+)
+from wedding_film.workspace import unsafe_destination_reason
 
 State = Literal["missing", "invalid", "stale", "ready", "complete-with-warnings"]
 
@@ -75,7 +80,7 @@ def _configuration_fact(workspace: Path) -> tuple[Fact, ProjectConfig | None]:
     except ConfigProblem as problem:
         state: State = "missing" if problem.code == "CONFIG_MISSING" else "invalid"
         next_commands = []
-        if state == "missing" and not workspace.exists():
+        if state == "missing" and unsafe_destination_reason(workspace) is None:
             next_commands = [_command(workspace, "project init")]
         fact = _fact(
             state,
@@ -104,20 +109,21 @@ def _credentials_fact(config: ProjectConfig | None) -> Fact:
             ["process-environment"],
             phase="project",
         )
-    openai_selected = config.vision.name == "openai" or config.narrative.name == "openai"
-    if openai_selected and not os.environ.get("OPENAI_API_KEY"):
+    required = required_credentials(config)
+    missing = [variable for variable in required if not os.environ.get(variable)]
+    if missing:
         return _fact(
             "missing",
             "CREDENTIAL_MISSING",
-            "the selected adapter requires OPENAI_API_KEY in the process environment",
-            ["process-environment:OPENAI_API_KEY"],
+            f"the selected adapter requires {missing[0]} in the process environment",
+            [f"process-environment:{missing[0]}"],
             phase="project",
         )
     return _fact(
         "ready",
-        "CREDENTIALS_AVAILABLE" if openai_selected else "CREDENTIALS_NOT_REQUIRED",
+        "CREDENTIALS_AVAILABLE" if required else "CREDENTIALS_NOT_REQUIRED",
         "required process-environment credentials are available"
-        if openai_selected
+        if required
         else "selected adapters require no credentials",
         ["process-environment"],
         phase="project",
@@ -202,130 +208,42 @@ def _current_hashes(artifacts: dict[str, Path]) -> dict[str, str]:
     }
 
 
-def _frontmatter(path: Path) -> tuple[dict[str, object], str]:
-    try:
-        contents = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        raise ValueError("artifact is not readable UTF-8 text") from None
-    if not contents.startswith("---\n") or "\n---\n" not in contents[4:]:
-        raise ValueError("artifact is missing YAML frontmatter")
-    frontmatter, body = contents[4:].split("\n---\n", 1)
-    try:
-        metadata = yaml.safe_load(frontmatter)
-    except yaml.YAMLError:
-        raise ValueError("artifact frontmatter is invalid YAML") from None
-    if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
-        raise ValueError("artifact frontmatter must be a mapping")
-    return metadata, body
-
-
-def _valid_input_hash(value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
-
-
-def _validate_catalog(path: Path) -> None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        records = [json.loads(line) for line in lines if line.strip()]
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise ValueError("catalog.jsonl must contain valid UTF-8 JSON objects") from None
-    if not records or not all(isinstance(record, dict) for record in records):
-        raise ValueError("catalog.jsonl must contain at least one JSON object")
-
-
-def _validate_story(path: Path) -> None:
-    metadata, body = _frontmatter(path)
-    title = metadata.get("title")
-    target_duration = metadata.get("target_duration_seconds")
-    if (
-        metadata.get("schema_version") != 1
-        or not isinstance(title, str)
-        or not title.strip()
-        or type(target_duration) is not int
-        or target_duration <= 0
-    ):
-        raise ValueError("story.md frontmatter is invalid")
-    headings = re.findall(r"^## (.+)$", body, flags=re.MULTILINE)
-    if headings != ["Intent", "Emotional Arc", "Moments"]:
-        raise ValueError("story.md requires Intent, Emotional Arc, and Moments in order")
-    sections = re.split(r"^## .+$", body, flags=re.MULTILINE)[1:]
-    if len(sections) != 3 or any(not section.strip() for section in sections):
-        raise ValueError("story.md sections must be non-empty")
-    if re.search(r"^### [a-z0-9]+(?:-[a-z0-9]+)*$", sections[2], re.MULTILINE) is None:
-        raise ValueError("story.md requires at least one valid Story Moment")
-
-
-def _validate_script(path: Path) -> None:
-    metadata, body = _frontmatter(path)
-    title = metadata.get("title")
-    inputs = metadata.get("inputs")
-    if (
-        metadata.get("schema_version") != 1
-        or not isinstance(title, str)
-        or not title.strip()
-        or not isinstance(inputs, dict)
-        or not _valid_input_hash(inputs.get("story"))
-    ):
-        raise ValueError("script.md frontmatter is invalid")
-    blocks = re.split(r"^## [a-z0-9]+(?:-[a-z0-9]+)*\s*$", body, flags=re.MULTILINE)[1:]
-    if not blocks:
-        raise ValueError("script.md requires at least one Script Block")
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if (
-            len(lines) < 3
-            or lines[0] not in ("type: narration", "type: card", "type: caption")
-            or re.fullmatch(r"story_moment: [a-z0-9]+(?:-[a-z0-9]+)*", lines[1]) is None
-        ):
-            raise ValueError("script.md contains an invalid Script Block")
-
-
-def _validate_storyboard(path: Path) -> None:
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError):
-        raise ValueError("storyboard.yaml is not valid UTF-8 YAML") from None
-    if not isinstance(loaded, dict) or loaded.get("schema_version") != 1:
-        raise ValueError("storyboard.yaml root is invalid")
-    output = loaded.get("output")
-    inputs = loaded.get("inputs")
-    sequence = loaded.get("sequence")
-    if (
-        not isinstance(output, dict)
-        or any(
-            type(output.get(key)) is not int or output[key] <= 0
-            for key in ("width", "height", "fps")
+def _artifact_preflight(
+    artifact: Path,
+    code_prefix: str,
+    phase: str,
+    dependencies: dict[str, Fact],
+    upstream_hashes: dict[str, str],
+) -> Fact | None:
+    if not artifact.exists():
+        return _fact(
+            "missing",
+            f"{code_prefix}_MISSING",
+            f"{artifact.name} is absent",
+            [str(artifact)],
+            phase=phase,
+            upstream_hashes=upstream_hashes,
         )
-        or not isinstance(inputs, dict)
-        or any(not _valid_input_hash(inputs.get(key)) for key in ("story", "script", "catalog"))
-        or not isinstance(sequence, list)
-        or not sequence
-        or not all(isinstance(item, dict) for item in sequence)
-    ):
-        raise ValueError("storyboard.yaml structure is invalid")
-
-
-def _validate_canonical(name: str, path: Path) -> None:
-    validators = {
-        "semantic_catalog": _validate_catalog,
-        "story": _validate_story,
-        "script": _validate_script,
-        "storyboard": _validate_storyboard,
-    }
-    validators[name](path)
-
-
-def _recorded_hashes(name: str, path: Path) -> dict[str, str]:
-    if name == "script":
-        metadata, _ = _frontmatter(path)
-        inputs = metadata["inputs"]
-        assert isinstance(inputs, dict)
-        return {"story": str(inputs["story"])}
-    if name == "storyboard":
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        inputs = loaded["inputs"]
-        return {key: str(value) for key, value in inputs.items()}
-    return {}
+    if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
+        return _fact(
+            "invalid",
+            f"{code_prefix}_INVALID_ARTIFACT",
+            f"{artifact.name} must be a non-empty regular file",
+            [str(artifact)],
+            phase=phase,
+            upstream_hashes=upstream_hashes,
+        )
+    blocked = [name for name, fact in dependencies.items() if not _usable(fact)]
+    if blocked:
+        return _fact(
+            "stale",
+            f"{code_prefix}_UPSTREAM_NOT_READY",
+            f"{artifact.name} cannot be current while upstream {blocked[0]} is not ready",
+            [str(artifact)],
+            phase=phase,
+            upstream_hashes=upstream_hashes,
+        )
+    return None
 
 
 def _canonical_fact(
@@ -336,79 +254,50 @@ def _canonical_fact(
 ) -> Fact:
     artifact = workspace / filename
     hashes = _current_hashes({key: value[0] for key, value in dependencies.items()})
-    if not artifact.exists():
-        return _fact(
-            "missing",
-            f"{name.upper()}_MISSING",
-            f"{filename} is absent",
-            [str(artifact)],
-            phase=name,
-            upstream_hashes=hashes,
-        )
-    if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
-        return _fact(
-            "invalid",
-            f"{name.upper()}_INVALID_ARTIFACT",
-            f"{filename} must be a non-empty regular file",
-            [str(artifact)],
-            phase=name,
-            upstream_hashes=hashes,
-        )
-    try:
-        _validate_canonical(name, artifact)
-    except ValueError as problem:
-        return _fact(
-            "invalid",
-            f"{name.upper()}_INVALID_CONTENT",
-            str(problem),
-            [str(artifact)],
-            phase=name,
-            upstream_hashes=hashes,
-        )
-    blocked = [key for key, (_, fact) in dependencies.items() if not _usable(fact)]
-    if blocked:
-        return _fact(
-            "stale",
-            f"{name.upper()}_UPSTREAM_NOT_READY",
-            f"{filename} cannot be current while upstream {blocked[0]} is not ready",
-            [str(artifact)],
-            phase=name,
-            upstream_hashes=hashes,
-        )
-    recorded_hashes = _recorded_hashes(name, artifact)
-    mismatches = [
-        dependency
-        for dependency, digest in hashes.items()
-        if dependency in recorded_hashes and recorded_hashes[dependency] != f"sha256:{digest}"
-    ]
-    if mismatches:
-        return _fact(
-            "stale",
-            f"{name.upper()}_UPSTREAM_HASH_MISMATCH",
-            f"{filename} records an older {mismatches[0]} hash",
-            [str(artifact)],
-            phase=name,
-            upstream_hashes=hashes,
-        )
+    preflight = _artifact_preflight(
+        artifact,
+        name.upper(),
+        name,
+        {key: value[1] for key, value in dependencies.items()},
+        hashes,
+    )
+    if preflight is not None:
+        return preflight
     return _fact(
-        "ready",
-        f"{name.upper()}_READY",
-        f"{filename} is present with ready upstream artifacts",
+        "invalid",
+        f"{name.upper()}_VALIDATOR_UNAVAILABLE",
+        f"{filename} cannot be ready until its owning validation slice is installed",
         [str(artifact)],
         phase=name,
         upstream_hashes=hashes,
     )
 
 
-def _probe_rough_cut(executable: str, artifact: Path) -> bool:
+def _expected_storyboard_frames(storyboard: Path) -> int | None:
+    try:
+        loaded = yaml.safe_load(storyboard.read_text(encoding="utf-8"))
+        sequence = loaded["sequence"]
+        total = 0
+        for item in sequence:
+            total += item["duration_frames"]
+            transition = item.get("transition")
+            if transition and transition.get("type") == "crossfade":
+                total -= transition["duration_frames"]
+    except (OSError, UnicodeError, TypeError, KeyError, yaml.YAMLError):
+        return None
+    return total if type(total) is int and total > 0 else None
+
+
+def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> bool:
     try:
         result = subprocess.run(
             [
                 executable,
                 "-v",
                 "error",
+                "-count_frames",
                 "-show_entries",
-                "stream=codec_type,codec_name,width,height,pix_fmt,r_frame_rate,avg_frame_rate",
+                "stream=codec_type,codec_name,width,height,pix_fmt,r_frame_rate,avg_frame_rate,nb_read_frames",
                 "-of",
                 "json",
                 str(artifact),
@@ -441,6 +330,7 @@ def _probe_rough_cut(executable: str, artifact: Path) -> bool:
         and video.get("pix_fmt") == "yuv420p"
         and video.get("r_frame_rate") == "24/1"
         and video.get("avg_frame_rate") == "24/1"
+        and video.get("nb_read_frames") == str(expected_frames)
     )
 
 
@@ -449,29 +339,16 @@ def _rough_cut_fact(
 ) -> Fact:
     artifact = workspace / "renders" / "rough-cut.mp4"
     hashes = _current_hashes({"storyboard": storyboard_path})
-    if not artifact.exists():
-        return _fact(
-            "missing",
-            "ROUGH_CUT_MISSING",
-            "renders/rough-cut.mp4 is absent",
-            [str(artifact)],
-            phase="render",
-            upstream_hashes=hashes,
-        )
-    if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
-        return _fact(
-            "invalid",
-            "ROUGH_CUT_INVALID_ARTIFACT",
-            "rough-cut.mp4 must be a non-empty regular file",
-            [str(artifact)],
-            phase="render",
-            upstream_hashes=hashes,
-        )
-    if not _usable(storyboard):
+    preflight = _artifact_preflight(
+        artifact, "ROUGH_CUT", "render", {"storyboard": storyboard}, hashes
+    )
+    if preflight is not None:
+        return preflight
+    if storyboard_path.stat().st_mtime_ns > artifact.stat().st_mtime_ns:
         return _fact(
             "stale",
-            "ROUGH_CUT_UPSTREAM_NOT_READY",
-            "rough-cut.mp4 cannot be current while Storyboard is not ready",
+            "ROUGH_CUT_OLDER_THAN_STORYBOARD",
+            "rough-cut.mp4 predates the current storyboard.yaml",
             [str(artifact)],
             phase="render",
             upstream_hashes=hashes,
@@ -496,12 +373,13 @@ def _rough_cut_fact(
                 }
             ],
         )
+    expected_frames = _expected_storyboard_frames(storyboard_path)
     ffprobe_path = ffprobe["artifacts"][0]
-    if not _probe_rough_cut(ffprobe_path, artifact):
+    if expected_frames is None or not _probe_rough_cut(ffprobe_path, artifact, expected_frames):
         return _fact(
             "invalid",
             "ROUGH_CUT_INVALID_MEDIA",
-            "rough-cut.mp4 does not match the fixed delivery contract",
+            "rough-cut.mp4 does not match the fixed delivery contract and frame count",
             [str(artifact)],
             phase="render",
             upstream_hashes=hashes,
@@ -551,7 +429,7 @@ def derive_status(workspace: Path) -> StatusPayload:
         "storyboard",
         "storyboard.yaml",
         {
-            "semantic_catalog": (catalog_path, catalog),
+            "catalog": (catalog_path, catalog),
             "story": (story_path, story),
             "script": (script_path, script),
         },
