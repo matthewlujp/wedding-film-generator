@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
+SUPPORTED_ADAPTERS = frozenset({"none", "fake", "openai"})
+
 
 @dataclass(frozen=True)
 class AdapterConfig:
@@ -113,8 +115,11 @@ def _language(value: object, location: str) -> str:
 def _adapter(value: object, location: str) -> AdapterConfig:
     data = _mapping(value, location)
     _exact_fields(data, ("name", "model", "prompt_version"), location)
+    name = _slug(data["name"], f"{location}.name")
+    if name not in SUPPORTED_ADAPTERS:
+        raise ConfigProblem("CONFIG_UNKNOWN_ADAPTER", f"{location}.name is not supported")
     return AdapterConfig(
-        name=_slug(data["name"], f"{location}.name"),
+        name=name,
         model=_non_empty_string(data["model"], f"{location}.model"),
         prompt_version=_non_empty_string(data["prompt_version"], f"{location}.prompt_version"),
     )

@@ -62,6 +62,11 @@ def _unsafe_destination(workspace: Path) -> str | None:
     if absolute == Path(absolute.anchor) or absolute == Path.home():
         return "destination is a protected directory"
 
+    system_aliases = {Path("/etc"), Path("/tmp"), Path("/var")}
+    for ancestor in reversed(absolute.parents):
+        if ancestor.is_symlink() and ancestor not in system_aliases:
+            return "destination has a symbolic-link ancestor"
+
     current = absolute
     while not current.exists() and current != current.parent:
         current = current.parent
