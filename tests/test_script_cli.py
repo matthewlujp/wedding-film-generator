@@ -408,8 +408,8 @@ def test_top_level_validate_checks_present_script_and_supports_strict_mode(
     script_path.write_text(valid_script(story), encoding="utf-8")
 
     valid = run_cli("--project", str(workspace), "validate", "--json")
-    assert valid.returncode == 0
-    assert json.loads(valid.stdout)["artifact"] == str(script_path)
+    assert valid.returncode == 1
+    assert json.loads(valid.stdout)["diagnostics"][0]["code"] == "STORYBOARD_MISSING"
 
     script_path.write_text(
         valid_script(story).replace("type: card", "type: rich-card"), encoding="utf-8"

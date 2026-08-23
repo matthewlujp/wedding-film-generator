@@ -14,9 +14,10 @@ import yaml
 
 from wedding_film.catalog import CatalogProblem, scan_catalog
 from wedding_film.exif import extract_exif
-from wedding_film.script import write_script_validation
+from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
 from wedding_film.story import validate_story, write_story_validation
+from wedding_film.storyboard import write_storyboard_validation
 from wedding_film.workspace import unsafe_destination_reason
 
 SUCCESS = 0
@@ -157,7 +158,12 @@ def write_validation(workspace: Path, as_json: bool, strict: bool) -> int:
     story = workspace / "story.md"
     if validate_story(story):
         return write_story_validation(workspace, as_json)
-    return write_script_validation(workspace, as_json, strict)
+    _, script_diagnostics, script_warnings = validate_script(
+        workspace / "script.md", workspace / "story.md"
+    )
+    if script_diagnostics or (strict and script_warnings):
+        return write_script_validation(workspace, as_json, strict)
+    return write_storyboard_validation(workspace, as_json, strict, integrated=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
     script_validate = script_commands.add_parser("validate")
     script_validate.add_argument("--json", action="store_true", dest="as_json")
     script_validate.add_argument("--strict", action="store_true")
+    storyboard = commands.add_parser("storyboard")
+    storyboard_commands = storyboard.add_subparsers(dest="storyboard_command", required=True)
+    storyboard_validate = storyboard_commands.add_parser("validate")
+    storyboard_validate.add_argument("--json", action="store_true", dest="as_json")
+    storyboard_validate.add_argument("--strict", action="store_true")
     return parser
 
 
@@ -205,6 +216,10 @@ def main(argv: list[str] | None = None) -> int:
             return write_story_validation(arguments.project, arguments.as_json)
         if arguments.command == "script" and arguments.script_command == "validate":
             return write_script_validation(arguments.project, arguments.as_json, arguments.strict)
+        if arguments.command == "storyboard" and arguments.storyboard_command == "validate":
+            return write_storyboard_validation(
+                arguments.project, arguments.as_json, arguments.strict
+            )
         return INVALID_OR_PREFLIGHT
     except KeyboardInterrupt:
         return INTERRUPTED
