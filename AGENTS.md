@@ -46,3 +46,17 @@ Avoid:
 
 Do not add Runway, facial recognition, DaVinci integration,
 or cloud infrastructure until the basic rough-cut pipeline works.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The canonical triage roles use the default label names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
