@@ -74,6 +74,41 @@ def test_validate_treats_headings_in_fenced_code_as_ordinary_markdown(tmp_path: 
     assert result.returncode == 0, result.stdout
 
 
+def test_validate_accepts_markdown_headings_indented_by_up_to_three_spaces(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "indented-headings"
+    workspace.mkdir()
+    story = workspace / "story.md"
+    story.write_text(
+        valid_story()
+        .replace("## Intent", "   ## Intent")
+        .replace("## Emotional Arc", "  ## Emotional Arc")
+        .replace("## Moments", " ## Moments")
+        .replace("### getting-ready", "   ### getting-ready")
+        .replace("### joyful-ceremony", "  ### joyful-ceremony"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_validate_rejects_four_space_heading_indentation(tmp_path: Path) -> None:
+    workspace = tmp_path / "over-indented-heading"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(
+        valid_story().replace("## Intent", "    ## Intent"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["diagnostics"][0]["code"] == "STORY_SECTION_ORDER"
+
+
 def test_validate_rejects_non_strict_or_unsupported_frontmatter(tmp_path: Path) -> None:
     replacements = {
         "unsupported": ("schema_version: 1", "schema_version: 2", "STORY_VERSION_UNSUPPORTED"),
@@ -113,6 +148,38 @@ def test_validate_rejects_non_strict_or_unsupported_frontmatter(tmp_path: Path) 
         assert diagnostic["artifact"] == str(workspace / "story.md")
         assert diagnostic["code"] == code
         assert diagnostic["location"].startswith("frontmatter.")
+
+
+def test_validate_accepts_positive_finite_decimal_target_duration(tmp_path: Path) -> None:
+    workspace = tmp_path / "decimal-duration"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(
+        valid_story().replace("target_duration_seconds: 300", "target_duration_seconds: 300.5"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_validate_rejects_non_finite_and_boolean_target_durations(tmp_path: Path) -> None:
+    for name, value in (("nan", ".nan"), ("infinity", ".inf"), ("boolean", "true")):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        (workspace / "story.md").write_text(
+            valid_story().replace(
+                "target_duration_seconds: 300", f"target_duration_seconds: {value}"
+            ),
+            encoding="utf-8",
+        )
+
+        result = run_cli("--project", str(workspace), "validate", "--json")
+
+        assert result.returncode == 1
+        diagnostic = json.loads(result.stdout)["diagnostics"][0]
+        assert diagnostic["code"] == "STORY_FRONTMATTER_INVALID_VALUE"
+        assert diagnostic["location"] == "frontmatter.target_duration_seconds"
 
 
 def test_validate_reports_malformed_yaml_without_a_traceback(tmp_path: Path) -> None:
@@ -182,6 +249,41 @@ def test_validate_rejects_invalid_section_and_moment_structure(tmp_path: Path) -
         assert diagnostic["artifact"] == str(story)
         assert diagnostic["code"] == code
         assert diagnostic["location"].startswith("sections.")
+
+
+def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> None:
+    base = valid_story()
+    cases = {
+        "comment-only-intent": (
+            base.replace("二人の歩みと **家族への感謝** を伝える。", "<!-- author note only -->"),
+            "STORY_SECTION_EMPTY",
+        ),
+        "empty-fence-arc": (
+            base.replace(
+                "Quiet anticipationから、祝福に満ちた喜びへ。",
+                "```markdown\n\n```",
+            ),
+            "STORY_SECTION_EMPTY",
+        ),
+        "comment-only-moment": (
+            base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "<!-- TODO -->"),
+            "STORY_MOMENT_EMPTY",
+        ),
+        "empty-fence-moment": (
+            base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "~~~\n\n~~~"),
+            "STORY_MOMENT_EMPTY",
+        ),
+    }
+
+    for name, (contents, code) in cases.items():
+        workspace = tmp_path / name
+        workspace.mkdir()
+        (workspace / "story.md").write_text(contents, encoding="utf-8")
+
+        result = run_cli("--project", str(workspace), "validate", "--json")
+
+        assert result.returncode == 1
+        assert json.loads(result.stdout)["diagnostics"][0]["code"] == code
 
 
 def test_validate_reports_stable_human_and_json_diagnostics(tmp_path: Path) -> None:

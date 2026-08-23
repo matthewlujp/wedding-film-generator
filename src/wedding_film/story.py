@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import TypedDict
@@ -22,10 +23,12 @@ class ValidationPayload(TypedDict):
     diagnostics: list[Diagnostic]
 
 
-_SECTION = re.compile(r"^## (.+)$")
-_MOMENT = re.compile(r"^### (.+)$")
+_SECTION = re.compile(r"^ {0,3}## (.+)$")
+_MOMENT = re.compile(r"^ {0,3}### (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_TAG = re.compile(r"<[^>]+>")
 
 
 class DuplicateFieldError(yaml.YAMLError):
@@ -81,6 +84,40 @@ def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
                 continue
         visible.append((index, line))
     return visible
+
+
+def _has_visible_prose(lines: list[str]) -> bool:
+    without_comments = _HTML_COMMENT.sub("", "\n".join(lines)).splitlines()
+    fence_character: str | None = None
+    fence_length = 0
+    content: list[str] = []
+    for line in without_comments:
+        if fence_character is not None:
+            stripped = line.lstrip(" ")
+            indentation = len(line) - len(stripped)
+            closing = stripped.rstrip(" ")
+            if (
+                indentation <= 3
+                and closing
+                and set(closing) == {fence_character}
+                and len(closing) >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            else:
+                content.append(line)
+            continue
+        match = _FENCE_OPEN.fullmatch(line)
+        if match is not None:
+            marker, info = match.groups()
+            if marker[0] == "~" or "`" not in info:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+        content.append(line)
+    visible = _HTML_TAG.sub("", "\n".join(content))
+    visible = re.sub(r"[\s*_~`#>\[\](){}.!:+\\|=-]", "", visible)
+    return bool(visible)
 
 
 def validate_story(path: Path) -> list[Diagnostic]:
@@ -162,13 +199,18 @@ def validate_story(path: Path) -> list[Diagnostic]:
                 "title must be a non-empty string",
             )
         ]
-    if type(duration) is not int or duration <= 0:
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int | float)
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
         return [
             _diagnostic(
                 path,
                 "STORY_FRONTMATTER_INVALID_VALUE",
                 "frontmatter.target_duration_seconds",
-                "target_duration_seconds must be a positive integer",
+                "target_duration_seconds must be a positive finite number",
             )
         ]
     structure = _markdown_structure(lines, closing + 1)
@@ -186,7 +228,7 @@ def validate_story(path: Path) -> list[Diagnostic]:
     intent_body = lines[section_lines[0] + 1 : section_lines[1]]
     arc_body = lines[section_lines[1] + 1 : section_lines[2]]
     for name, body in (("intent", intent_body), ("emotional-arc", arc_body)):
-        if not any(line.strip() for line in body):
+        if not _has_visible_prose(body):
             return [
                 _diagnostic(
                     path,
@@ -237,7 +279,7 @@ def validate_story(path: Path) -> list[Diagnostic]:
             ]
         seen.add(moment_id)
         end = moment_lines[position + 1] if position + 1 < len(moment_lines) else len(moments_body)
-        if not any(line.strip() for line in moments_body[start + 1 : end]):
+        if not _has_visible_prose(moments_body[start + 1 : end]):
             return [
                 _diagnostic(
                     path,
