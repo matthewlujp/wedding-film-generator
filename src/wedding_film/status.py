@@ -1,0 +1,555 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shlex
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Literal, TypedDict, cast
+
+import yaml
+
+from wedding_film.adapters import required_credentials
+from wedding_film.config import (
+    ConfigProblem,
+    ProjectConfig,
+    load_project_config,
+)
+from wedding_film.workspace import unsafe_destination_reason
+
+State = Literal["missing", "invalid", "stale", "ready", "complete-with-warnings"]
+
+
+class StatusMessage(TypedDict):
+    code: str
+    message: str
+
+
+class Fact(TypedDict):
+    phase: str
+    state: State
+    reasons: list[StatusMessage]
+    artifacts: list[str]
+    upstream_hashes: dict[str, str]
+    warnings: list[StatusMessage]
+    next_commands: list[str]
+
+
+class StatusPayload(TypedDict):
+    schema_version: int
+    workspace: str
+    state: State
+    prerequisites: dict[str, Fact]
+    layers: dict[str, Fact]
+    warnings: list[StatusMessage]
+    safe_next_commands: list[str]
+
+
+def _fact(
+    state: State,
+    code: str,
+    message: str,
+    artifacts: list[str],
+    *,
+    phase: str,
+    upstream_hashes: dict[str, str] | None = None,
+    warnings: list[StatusMessage] | None = None,
+    next_commands: list[str] | None = None,
+) -> Fact:
+    return {
+        "phase": phase,
+        "state": state,
+        "reasons": [{"code": code, "message": message}],
+        "artifacts": artifacts,
+        "upstream_hashes": upstream_hashes or {},
+        "warnings": warnings or [],
+        "next_commands": next_commands or [],
+    }
+
+
+def _command(workspace: Path, suffix: str) -> str:
+    return f"wedding-film --project {shlex.quote(str(workspace))} {suffix}"
+
+
+def _io_error_fact(code_prefix: str, artifact: Path, phase: str) -> Fact:
+    return _fact(
+        "invalid",
+        f"{code_prefix}_IO_ERROR",
+        f"{artifact.name} could not be inspected",
+        [str(artifact)],
+        phase=phase,
+    )
+
+
+def _configuration_fact(workspace: Path) -> tuple[Fact, ProjectConfig | None]:
+    config_path = workspace / "project.yaml"
+    artifact = str(config_path)
+    try:
+        config = load_project_config(workspace)
+    except ConfigProblem as problem:
+        state: State = "missing" if problem.code == "CONFIG_MISSING" else "invalid"
+        next_commands = []
+        if state == "missing":
+            try:
+                if unsafe_destination_reason(workspace) is None:
+                    next_commands = [_command(workspace, "project init")]
+            except OSError:
+                return _io_error_fact("CONFIG", config_path, "project"), None
+        fact = _fact(
+            state,
+            problem.code,
+            problem.message,
+            [artifact],
+            phase="project",
+            next_commands=next_commands,
+        )
+        return fact, None
+    return _fact(
+        "ready",
+        "CONFIG_VALID",
+        "project configuration is valid",
+        [artifact],
+        phase="project",
+    ), config
+
+
+def _credentials_fact(config: ProjectConfig | None) -> Fact:
+    if config is None:
+        return _fact(
+            "missing",
+            "CREDENTIAL_CHECK_BLOCKED",
+            "credentials cannot be checked until project configuration is valid",
+            ["process-environment"],
+            phase="project",
+        )
+    required = required_credentials((config.vision.name, config.narrative.name))
+    missing = [variable for variable in required if not os.environ.get(variable)]
+    if missing:
+        return _fact(
+            "missing",
+            "CREDENTIAL_MISSING",
+            f"the selected adapter requires {missing[0]} in the process environment",
+            [f"process-environment:{missing[0]}"],
+            phase="project",
+        )
+    return _fact(
+        "ready",
+        "CREDENTIALS_AVAILABLE" if required else "CREDENTIALS_NOT_REQUIRED",
+        "required process-environment credentials are available"
+        if required
+        else "selected adapters require no credentials",
+        ["process-environment"],
+        phase="project",
+    )
+
+
+def _executable_fact(command: str) -> Fact:
+    try:
+        executable = shutil.which(command)
+    except OSError:
+        return _io_error_fact(command.upper(), Path(command), "render")
+    if executable is None:
+        return _fact(
+            "missing",
+            f"{command.upper()}_MISSING",
+            f"{command} is not available on PATH",
+            [command],
+            phase="render",
+        )
+    return _fact(
+        "ready",
+        f"{command.upper()}_AVAILABLE",
+        f"{command} is available",
+        [executable],
+        phase="render",
+    )
+
+
+def _usable(fact: Fact) -> bool:
+    return fact["state"] in ("ready", "complete-with-warnings")
+
+
+def _materials_fact(workspace: Path) -> Fact:
+    materials = workspace / "materials"
+    try:
+        if materials.is_symlink():
+            return _fact(
+                "invalid",
+                "MATERIALS_UNSAFE",
+                "Materials must be a real directory inside the Project Workspace",
+                [str(materials)],
+                phase="catalog",
+            )
+        if not materials.exists():
+            return _fact(
+                "missing",
+                "MATERIALS_MISSING",
+                "user-managed Materials directory is absent",
+                [str(materials)],
+                phase="catalog",
+            )
+        if not materials.is_dir():
+            return _fact(
+                "invalid",
+                "MATERIALS_UNSAFE",
+                "Materials must be a real directory inside the Project Workspace",
+                [str(materials)],
+                phase="catalog",
+            )
+        warnings: list[StatusMessage] = []
+        if not any(materials.iterdir()):
+            warnings.append(
+                {"code": "MATERIALS_EMPTY", "message": "Materials contains no entries"}
+            )
+    except OSError:
+        return _io_error_fact("MATERIALS", materials, "catalog")
+    return _fact(
+        "ready",
+        "MATERIALS_READY",
+        "user-managed Materials directory is available",
+        [str(materials)],
+        phase="catalog",
+        warnings=warnings,
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _current_hashes(
+    artifacts: dict[str, Path], code_prefix: str, phase: str
+) -> tuple[dict[str, str], Fact | None]:
+    hashes: dict[str, str] = {}
+    for name, path in artifacts.items():
+        try:
+            if path.is_file() and not path.is_symlink():
+                hashes[name] = _sha256(path)
+        except OSError:
+            return {}, _io_error_fact(code_prefix, path, phase)
+    return hashes, None
+
+
+def _artifact_preflight(
+    artifact: Path,
+    code_prefix: str,
+    phase: str,
+    dependencies: dict[str, Fact],
+    upstream_hashes: dict[str, str],
+) -> Fact | None:
+    try:
+        if not artifact.exists():
+            return _fact(
+                "missing",
+                f"{code_prefix}_MISSING",
+                f"{artifact.name} is absent",
+                [str(artifact)],
+                phase=phase,
+                upstream_hashes=upstream_hashes,
+            )
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
+            return _fact(
+                "invalid",
+                f"{code_prefix}_INVALID_ARTIFACT",
+                f"{artifact.name} must be a non-empty regular file",
+                [str(artifact)],
+                phase=phase,
+                upstream_hashes=upstream_hashes,
+            )
+        with artifact.open("rb") as source:
+            source.read(1)
+    except OSError:
+        return _io_error_fact(code_prefix, artifact, phase)
+    blocked = [name for name, fact in dependencies.items() if not _usable(fact)]
+    if blocked:
+        return _fact(
+            "stale",
+            f"{code_prefix}_UPSTREAM_NOT_READY",
+            f"{artifact.name} cannot be current while upstream {blocked[0]} is not ready",
+            [str(artifact)],
+            phase=phase,
+            upstream_hashes=upstream_hashes,
+        )
+    return None
+
+
+def _canonical_fact(
+    workspace: Path,
+    name: str,
+    filename: str,
+    dependencies: dict[str, tuple[Path, Fact]],
+) -> Fact:
+    artifact = workspace / filename
+    hashes, hash_error = _current_hashes(
+        {key: value[0] for key, value in dependencies.items()}, name.upper(), name
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact,
+        name.upper(),
+        name,
+        {key: value[1] for key, value in dependencies.items()},
+        hashes,
+    )
+    if preflight is not None:
+        return preflight
+    return _fact(
+        "invalid",
+        f"{name.upper()}_VALIDATOR_UNAVAILABLE",
+        f"{filename} cannot be ready until its owning validation slice is installed",
+        [str(artifact)],
+        phase=name,
+        upstream_hashes=hashes,
+    )
+
+
+def _expected_storyboard_frames(storyboard: Path) -> int | None:
+    try:
+        loaded = yaml.safe_load(storyboard.read_text(encoding="utf-8"))
+        sequence = loaded["sequence"]
+        total = 0
+        for item in sequence:
+            total += item["duration_frames"]
+            transition = item.get("transition")
+            if transition and transition.get("type") == "crossfade":
+                total -= transition["duration_frames"]
+    except (OSError, UnicodeError, TypeError, KeyError, yaml.YAMLError):
+        return None
+    return total if type(total) is int and total > 0 else None
+
+
+def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-v",
+                "error",
+                "-count_frames",
+                "-show_entries",
+                "format=format_name:stream=codec_type,codec_name,width,height,pix_fmt,"
+                "sample_aspect_ratio,r_frame_rate,avg_frame_rate,nb_read_frames",
+                "-of",
+                "json",
+                str(artifact),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    format_value = payload.get("format")
+    if not isinstance(format_value, dict):
+        return False
+    format_name = format_value.get("format_name")
+    if not isinstance(format_name, str) or "mp4" not in format_name.split(","):
+        return False
+    streams_value = payload.get("streams")
+    if not isinstance(streams_value, list) or not all(
+        isinstance(stream, dict) for stream in streams_value
+    ):
+        return False
+    streams = cast(list[dict[str, object]], streams_value)
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    if len(streams) != 1 or len(videos) != 1:
+        return False
+    video = videos[0]
+    return (
+        video.get("codec_name") == "h264"
+        and video.get("width") == 1920
+        and video.get("height") == 1080
+        and video.get("pix_fmt") == "yuv420p"
+        and video.get("sample_aspect_ratio") == "1:1"
+        and video.get("r_frame_rate") == "24/1"
+        and video.get("avg_frame_rate") == "24/1"
+        and video.get("nb_read_frames") == str(expected_frames)
+    )
+
+
+def _rough_cut_fact(
+    workspace: Path, storyboard_path: Path, storyboard: Fact, ffmpeg: Fact, ffprobe: Fact
+) -> Fact:
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    hashes, hash_error = _current_hashes(
+        {"storyboard": storyboard_path}, "ROUGH_CUT", "render"
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact, "ROUGH_CUT", "render", {"storyboard": storyboard}, hashes
+    )
+    if preflight is not None:
+        return preflight
+    try:
+        storyboard_mtime = storyboard_path.stat().st_mtime_ns
+        artifact_mtime = artifact.stat().st_mtime_ns
+    except OSError:
+        return _io_error_fact("ROUGH_CUT", artifact, "render")
+    if storyboard_mtime > artifact_mtime:
+        return _fact(
+            "stale",
+            "ROUGH_CUT_OLDER_THAN_STORYBOARD",
+            "rough-cut.mp4 predates the current storyboard.yaml",
+            [str(artifact)],
+            phase="render",
+            upstream_hashes=hashes,
+        )
+    unavailable = [
+        name
+        for name, fact in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe))
+        if not _usable(fact)
+    ]
+    if unavailable:
+        return _fact(
+            "complete-with-warnings",
+            "ROUGH_CUT_COMPLETE_WITH_WARNINGS",
+            "rough-cut.mp4 exists but cannot be checked with the complete toolchain",
+            [str(artifact)],
+            phase="render",
+            upstream_hashes=hashes,
+            warnings=[
+                {
+                    "code": "TOOLCHAIN_UNAVAILABLE",
+                    "message": f"{unavailable[0]} is unavailable for verification",
+                }
+            ],
+        )
+    expected_frames = _expected_storyboard_frames(storyboard_path)
+    ffprobe_path = ffprobe["artifacts"][0]
+    if expected_frames is None or not _probe_rough_cut(ffprobe_path, artifact, expected_frames):
+        return _fact(
+            "invalid",
+            "ROUGH_CUT_INVALID_MEDIA",
+            "rough-cut.mp4 does not match the fixed delivery contract and frame count",
+            [str(artifact)],
+            phase="render",
+            upstream_hashes=hashes,
+        )
+    return _fact(
+        "ready",
+        "ROUGH_CUT_READY",
+        "rough-cut.mp4 exists with ready inputs and prerequisites",
+        [str(artifact)],
+        phase="render",
+        upstream_hashes=hashes,
+    )
+
+
+def derive_status(workspace: Path) -> StatusPayload:
+    configuration, config = _configuration_fact(workspace)
+    ffmpeg = _executable_fact("ffmpeg")
+    ffprobe = _executable_fact("ffprobe")
+    credentials = _credentials_fact(config)
+
+    materials_path = workspace / "materials"
+    catalog_path = workspace / "catalog.jsonl"
+    story_path = workspace / "story.md"
+    script_path = workspace / "script.md"
+    storyboard_path = workspace / "storyboard.yaml"
+    materials = _materials_fact(workspace)
+    catalog = _canonical_fact(
+        workspace,
+        "semantic_catalog",
+        "catalog.jsonl",
+        {"materials": (materials_path, materials)},
+    )
+    story = _canonical_fact(
+        workspace,
+        "story",
+        "story.md",
+        {"semantic_catalog": (catalog_path, catalog)},
+    )
+    script = _canonical_fact(
+        workspace,
+        "script",
+        "script.md",
+        {"story": (story_path, story)},
+    )
+    storyboard = _canonical_fact(
+        workspace,
+        "storyboard",
+        "storyboard.yaml",
+        {
+            "semantic_catalog": (catalog_path, catalog),
+            "story": (story_path, story),
+            "script": (script_path, script),
+        },
+    )
+    rough_cut = _rough_cut_fact(workspace, storyboard_path, storyboard, ffmpeg, ffprobe)
+    prerequisites = {
+        "project_configuration": configuration,
+        "credentials": credentials,
+        "ffmpeg": ffmpeg,
+        "ffprobe": ffprobe,
+    }
+    layers = {
+        "materials": materials,
+        "semantic_catalog": catalog,
+        "story": story,
+        "script": script,
+        "storyboard": storyboard,
+        "rough_cut": rough_cut,
+    }
+    facts = [*prerequisites.values(), *layers.values()]
+    state: State = "ready"
+    if any(fact["state"] == "invalid" for fact in facts):
+        state = "invalid"
+    elif any(fact["state"] == "stale" for fact in facts):
+        state = "stale"
+    elif any(fact["state"] == "missing" for fact in facts):
+        state = "missing"
+    elif any(fact["state"] == "complete-with-warnings" for fact in facts):
+        state = "complete-with-warnings"
+    all_warnings = [warning for fact in facts for warning in fact["warnings"]]
+    all_commands = list(
+        dict.fromkeys(command for fact in facts for command in fact["next_commands"])
+    )
+    return {
+        "schema_version": 1,
+        "workspace": str(workspace),
+        "state": state,
+        "prerequisites": prerequisites,
+        "layers": layers,
+        "warnings": all_warnings,
+        "safe_next_commands": all_commands,
+    }
+
+
+def _render_fact(kind: str, name: str, fact: Fact) -> None:
+    print(f"{kind}.{name} state={fact['state']} phase={fact['phase']}")
+    for reason in fact["reasons"]:
+        print(f"  reason={reason['code']} message={reason['message']}")
+    for artifact in fact["artifacts"]:
+        print(f"  artifact={artifact}")
+    for upstream, digest in fact["upstream_hashes"].items():
+        print(f"  upstream_hash={upstream}:{digest}")
+    for warning in fact["warnings"]:
+        print(f"  warning={warning['code']} message={warning['message']}")
+    for command in fact["next_commands"]:
+        print(f"  next={command}")
+
+
+def write_status(workspace: Path, as_json: bool) -> int:
+    status = derive_status(workspace)
+    if as_json:
+        print(json.dumps(status, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"Project Workspace: {status['workspace']}")
+        print(f"Pipeline state: {status['state']}")
+        for kind in ("prerequisites", "layers"):
+            for name, fact in status[kind].items():
+                _render_fact(kind[:-1], name, fact)
+    configuration = status["prerequisites"]["project_configuration"]
+    return 1 if status["state"] == "invalid" or not _usable(configuration) else 0
