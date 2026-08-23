@@ -12,6 +12,7 @@ from typing import NoReturn, TextIO
 
 import yaml
 
+from wedding_film.catalog import CatalogProblem, scan_catalog
 from wedding_film.status import write_status
 from wedding_film.workspace import unsafe_destination_reason
 
@@ -75,6 +76,26 @@ def _emit(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdo
     )
 
 
+def _emit_catalog(
+    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=catalog artifact=catalog.jsonl "
+        f"code={code} message={message}",
+        file=stream,
+    )
+
+
+def scan(workspace: Path) -> int:
+    try:
+        count = scan_catalog(workspace)
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_catalog(workspace, "CATALOG_SCANNED", f"catalog contains {count} Original Assets")
+    return SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -124,6 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
     project = commands.add_parser("project")
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_commands.add_parser("init")
+    catalog = commands.add_parser("catalog")
+    catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
+    catalog_commands.add_parser("scan")
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -134,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "project" and arguments.project_command == "init":
             return initialize(arguments.project)
+        if arguments.command == "catalog" and arguments.catalog_command == "scan":
+            return scan(arguments.project)
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
         return INVALID_OR_PREFLIGHT
