@@ -6,6 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from wedding_film import status as status_module
+from wedding_film.cli import main
+
 
 def run_cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     executable = Path(sys.executable).with_name("wedding-film")
@@ -289,3 +294,32 @@ def test_status_never_advertises_commands_missing_from_the_cli(tmp_path: Path) -
         for group in (status["prerequisites"], status["layers"])
         for fact in group.values()
     )
+
+
+def test_status_json_reports_artifact_io_errors_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = tmp_path / "unreadable-artifact"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    (workspace / "materials").mkdir()
+    catalog = workspace / "catalog.jsonl"
+    catalog.write_text('{"asset_id":"photo-1"}\n', encoding="utf-8")
+    original_sha256 = status_module._sha256
+
+    def unreadable_catalog(path: Path) -> str:
+        if path == catalog:
+            raise PermissionError("catalog cannot be read")
+        return original_sha256(path)
+
+    monkeypatch.setattr(status_module, "_sha256", unreadable_catalog)
+
+    returncode = main(["--project", str(workspace), "status", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert returncode == 1
+    assert "Traceback" not in captured.err
+    assert payload["state"] == "invalid"
+    assert payload["layers"]["story"]["state"] == "invalid"
+    assert payload["layers"]["story"]["reasons"][0]["code"] == "STORY_IO_ERROR"
+    assert payload["layers"]["story"]["artifacts"] == [str(catalog)]

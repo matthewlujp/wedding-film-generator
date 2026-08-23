@@ -73,15 +73,30 @@ def _command(workspace: Path, suffix: str) -> str:
     return f"wedding-film --project {shlex.quote(str(workspace))} {suffix}"
 
 
+def _io_error_fact(code_prefix: str, artifact: Path, phase: str) -> Fact:
+    return _fact(
+        "invalid",
+        f"{code_prefix}_IO_ERROR",
+        f"{artifact.name} could not be inspected",
+        [str(artifact)],
+        phase=phase,
+    )
+
+
 def _configuration_fact(workspace: Path) -> tuple[Fact, ProjectConfig | None]:
-    artifact = str(workspace / "project.yaml")
+    config_path = workspace / "project.yaml"
+    artifact = str(config_path)
     try:
         config = load_project_config(workspace)
     except ConfigProblem as problem:
         state: State = "missing" if problem.code == "CONFIG_MISSING" else "invalid"
         next_commands = []
-        if state == "missing" and unsafe_destination_reason(workspace) is None:
-            next_commands = [_command(workspace, "project init")]
+        if state == "missing":
+            try:
+                if unsafe_destination_reason(workspace) is None:
+                    next_commands = [_command(workspace, "project init")]
+            except OSError:
+                return _io_error_fact("CONFIG", config_path, "project"), None
         fact = _fact(
             state,
             problem.code,
@@ -131,7 +146,10 @@ def _credentials_fact(config: ProjectConfig | None) -> Fact:
 
 
 def _executable_fact(command: str) -> Fact:
-    executable = shutil.which(command)
+    try:
+        executable = shutil.which(command)
+    except OSError:
+        return _io_error_fact(command.upper(), Path(command), "render")
     if executable is None:
         return _fact(
             "missing",
@@ -155,33 +173,38 @@ def _usable(fact: Fact) -> bool:
 
 def _materials_fact(workspace: Path) -> Fact:
     materials = workspace / "materials"
-    if materials.is_symlink():
-        return _fact(
-            "invalid",
-            "MATERIALS_UNSAFE",
-            "Materials must be a real directory inside the Project Workspace",
-            [str(materials)],
-            phase="catalog",
-        )
-    if not materials.exists():
-        return _fact(
-            "missing",
-            "MATERIALS_MISSING",
-            "user-managed Materials directory is absent",
-            [str(materials)],
-            phase="catalog",
-        )
-    if not materials.is_dir():
-        return _fact(
-            "invalid",
-            "MATERIALS_UNSAFE",
-            "Materials must be a real directory inside the Project Workspace",
-            [str(materials)],
-            phase="catalog",
-        )
-    warnings: list[StatusMessage] = []
-    if not any(materials.iterdir()):
-        warnings.append({"code": "MATERIALS_EMPTY", "message": "Materials contains no entries"})
+    try:
+        if materials.is_symlink():
+            return _fact(
+                "invalid",
+                "MATERIALS_UNSAFE",
+                "Materials must be a real directory inside the Project Workspace",
+                [str(materials)],
+                phase="catalog",
+            )
+        if not materials.exists():
+            return _fact(
+                "missing",
+                "MATERIALS_MISSING",
+                "user-managed Materials directory is absent",
+                [str(materials)],
+                phase="catalog",
+            )
+        if not materials.is_dir():
+            return _fact(
+                "invalid",
+                "MATERIALS_UNSAFE",
+                "Materials must be a real directory inside the Project Workspace",
+                [str(materials)],
+                phase="catalog",
+            )
+        warnings: list[StatusMessage] = []
+        if not any(materials.iterdir()):
+            warnings.append(
+                {"code": "MATERIALS_EMPTY", "message": "Materials contains no entries"}
+            )
+    except OSError:
+        return _io_error_fact("MATERIALS", materials, "catalog")
     return _fact(
         "ready",
         "MATERIALS_READY",
@@ -200,12 +223,17 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _current_hashes(artifacts: dict[str, Path]) -> dict[str, str]:
-    return {
-        name: _sha256(path)
-        for name, path in artifacts.items()
-        if path.is_file() and not path.is_symlink()
-    }
+def _current_hashes(
+    artifacts: dict[str, Path], code_prefix: str, phase: str
+) -> tuple[dict[str, str], Fact | None]:
+    hashes: dict[str, str] = {}
+    for name, path in artifacts.items():
+        try:
+            if path.is_file() and not path.is_symlink():
+                hashes[name] = _sha256(path)
+        except OSError:
+            return {}, _io_error_fact(code_prefix, path, phase)
+    return hashes, None
 
 
 def _artifact_preflight(
@@ -215,24 +243,29 @@ def _artifact_preflight(
     dependencies: dict[str, Fact],
     upstream_hashes: dict[str, str],
 ) -> Fact | None:
-    if not artifact.exists():
-        return _fact(
-            "missing",
-            f"{code_prefix}_MISSING",
-            f"{artifact.name} is absent",
-            [str(artifact)],
-            phase=phase,
-            upstream_hashes=upstream_hashes,
-        )
-    if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
-        return _fact(
-            "invalid",
-            f"{code_prefix}_INVALID_ARTIFACT",
-            f"{artifact.name} must be a non-empty regular file",
-            [str(artifact)],
-            phase=phase,
-            upstream_hashes=upstream_hashes,
-        )
+    try:
+        if not artifact.exists():
+            return _fact(
+                "missing",
+                f"{code_prefix}_MISSING",
+                f"{artifact.name} is absent",
+                [str(artifact)],
+                phase=phase,
+                upstream_hashes=upstream_hashes,
+            )
+        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
+            return _fact(
+                "invalid",
+                f"{code_prefix}_INVALID_ARTIFACT",
+                f"{artifact.name} must be a non-empty regular file",
+                [str(artifact)],
+                phase=phase,
+                upstream_hashes=upstream_hashes,
+            )
+        with artifact.open("rb") as source:
+            source.read(1)
+    except OSError:
+        return _io_error_fact(code_prefix, artifact, phase)
     blocked = [name for name, fact in dependencies.items() if not _usable(fact)]
     if blocked:
         return _fact(
@@ -253,7 +286,11 @@ def _canonical_fact(
     dependencies: dict[str, tuple[Path, Fact]],
 ) -> Fact:
     artifact = workspace / filename
-    hashes = _current_hashes({key: value[0] for key, value in dependencies.items()})
+    hashes, hash_error = _current_hashes(
+        {key: value[0] for key, value in dependencies.items()}, name.upper(), name
+    )
+    if hash_error is not None:
+        return hash_error
     preflight = _artifact_preflight(
         artifact,
         name.upper(),
@@ -345,13 +382,22 @@ def _rough_cut_fact(
     workspace: Path, storyboard_path: Path, storyboard: Fact, ffmpeg: Fact, ffprobe: Fact
 ) -> Fact:
     artifact = workspace / "renders" / "rough-cut.mp4"
-    hashes = _current_hashes({"storyboard": storyboard_path})
+    hashes, hash_error = _current_hashes(
+        {"storyboard": storyboard_path}, "ROUGH_CUT", "render"
+    )
+    if hash_error is not None:
+        return hash_error
     preflight = _artifact_preflight(
         artifact, "ROUGH_CUT", "render", {"storyboard": storyboard}, hashes
     )
     if preflight is not None:
         return preflight
-    if storyboard_path.stat().st_mtime_ns > artifact.stat().st_mtime_ns:
+    try:
+        storyboard_mtime = storyboard_path.stat().st_mtime_ns
+        artifact_mtime = artifact.stat().st_mtime_ns
+    except OSError:
+        return _io_error_fact("ROUGH_CUT", artifact, "render")
+    if storyboard_mtime > artifact_mtime:
         return _fact(
             "stale",
             "ROUGH_CUT_OLDER_THAN_STORYBOARD",
