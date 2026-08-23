@@ -22,7 +22,7 @@ from wedding_film.catalog import (
 )
 from wedding_film.config import ConfigProblem, load_project_config
 from wedding_film.vision_adapter import (
-    AdapterAsset,
+    AdapterFailure,
     AdapterSettings,
     AnalysisDerivative,
     OutputSchema,
@@ -109,28 +109,69 @@ def _make_derivative(source: Path, destination: Path) -> AnalysisDerivative:
 
 
 def _schema() -> OutputSchema:
-    definition: dict[str, object] = {
-        "description": {"type": "string", "nullable": True},
+    nullable_string: dict[str, object] = {"type": ["string", "null"]}
+    nullable_string_array: dict[str, object] = {
+        "anyOf": [
+            {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+            {"type": "null"},
+        ]
+    }
+    values: dict[str, object] = {
+        "description": nullable_string,
         "wedding_moment": {
-            "enum": ["preparation", "ceremony", "portraits", "reception", "other"],
-            "nullable": True,
+            "anyOf": [
+                {
+                    "enum": [
+                        "preparation",
+                        "ceremony",
+                        "portraits",
+                        "reception",
+                        "other",
+                    ]
+                },
+                {"type": "null"},
+            ]
         },
-        "subject_roles": {"type": "sorted_unique_string_array", "nullable": True},
-        "setting": {"type": "string", "nullable": True},
-        "mood": {"type": "sorted_unique_string_array", "nullable": True},
-        "shot_type": {"enum": ["wide", "medium", "close-up", "detail"], "nullable": True},
-        "quality_flags": {"type": "sorted_unique_string_array", "nullable": True},
-        "confidence": {"type": "finite_number", "minimum": 0, "maximum": 1},
+        "subject_roles": nullable_string_array,
+        "setting": nullable_string,
+        "mood": nullable_string_array,
+        "shot_type": {
+            "anyOf": [
+                {"enum": ["wide", "medium", "close-up", "detail"]},
+                {"type": "null"},
+            ]
+        },
+        "quality_flags": nullable_string_array,
+    }
+    fields = tuple(sorted(INFERENCE_KEYS))
+    properties = {
+        name: {
+            "type": "object",
+            "required": ["value", "confidence"],
+            "additionalProperties": False,
+            "properties": {
+                "value": values[name],
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+        }
+        for name in fields
+    }
+    definition: dict[str, object] = {
+        "type": "object",
+        "required": list(fields),
+        "additionalProperties": False,
+        "properties": properties,
     }
     return OutputSchema(
         version=OUTPUT_SCHEMA_VERSION,
-        fields=tuple(sorted(INFERENCE_KEYS)),
+        fields=fields,
         definition=definition,
     )
 
 
 def _fingerprint(
-    asset: AdapterAsset,
+    original_asset_id: str,
+    original_byte_size: int,
     derivative: AnalysisDerivative,
     adapter_name: str,
     adapter_provider: str,
@@ -138,7 +179,10 @@ def _fingerprint(
     schema: OutputSchema,
 ) -> str:
     contract = {
-        "original_asset": {"asset_id": asset.asset_id, "byte_size": asset.byte_size},
+        "original_asset": {
+            "asset_id": original_asset_id,
+            "byte_size": original_byte_size,
+        },
         "derivative": {
             "sha256": derivative.sha256,
             "recipe_version": derivative.recipe_version,
@@ -199,6 +243,31 @@ def _is_reusable(record: dict[str, Any], run_id: str) -> bool:
     )
 
 
+def _remove_derivative(path: Path) -> None:
+    if os.environ.get("WEDDING_FILM_TEST_FAIL_DERIVATIVE_CLEANUP") == "1":
+        raise CatalogProblem(
+            "VISION_INPUT_CLEANUP_FAILED", "temporary Analysis Input could not be deleted"
+        )
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        raise CatalogProblem(
+            "VISION_INPUT_CLEANUP_FAILED", "temporary Analysis Input could not be deleted"
+        ) from error
+
+
+def _append_and_publish_run(
+    temporary: Path, destination: Path, events: list[dict[str, object]]
+) -> None:
+    try:
+        with temporary.open("a", encoding="utf-8", newline="\n") as stream:
+            for event in events:
+                _write_event(stream, event)
+        os.replace(temporary, destination)
+    except OSError as error:
+        raise CatalogProblem("VISION_IO_ERROR", "Analysis Run could not be finalized") from error
+
+
 def analyze_asset(workspace: Path, asset_id: str) -> AnalysisResult:
     records = load_catalog(workspace)
     try:
@@ -227,14 +296,36 @@ def analyze_asset(workspace: Path, asset_id: str) -> AnalysisResult:
     derivative: AnalysisDerivative | None = None
     run_temp: Path | None = None
     response_usage: dict[str, int] = {}
+    provider_metadata: dict[str, object] = {}
+    failure_retryable = False
+    failure_category = "local_input"
+    adapter_attempted = False
     try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".analysis-input-", suffix=".jpg", dir=candidate_directory
+        run_descriptor, run_temp_name = tempfile.mkstemp(
+            prefix=f".{run_path.name}.", suffix=".candidate", dir=run_directory
         )
-        os.close(descriptor)
-        derivative_path = Path(temporary_name)
+        run_temp = Path(run_temp_name)
+        with os.fdopen(run_descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            _write_event(
+                stream,
+                {
+                    "type": "command",
+                    "command_id": command_id,
+                    "command": "catalog analyze",
+                    "started_at": _now(),
+                },
+            )
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".analysis-input-", suffix=".jpg", dir=candidate_directory
+            )
+            os.close(descriptor)
+            derivative_path = Path(temporary_name)
+        except OSError as error:
+            raise CatalogProblem(
+                "VISION_INPUT_IO_ERROR", "temporary Analysis Input could not be created"
+            ) from error
         derivative = _make_derivative(workspace / record["locators"][0], derivative_path)
-        asset = AdapterAsset(asset_id=asset_id, byte_size=record["byte_size"])
         settings = AdapterSettings(
             model=config.vision.model,
             prompt_version=config.vision.prompt_version,
@@ -243,127 +334,193 @@ def analyze_asset(workspace: Path, asset_id: str) -> AnalysisResult:
         )
         schema = _schema()
         fingerprint = _fingerprint(
-            asset, derivative, adapter.name, adapter.provider, settings, schema
+            asset_id,
+            record["byte_size"],
+            derivative,
+            adapter.name,
+            adapter.provider,
+            settings,
+            schema,
         )
         run_id = f"vision:{fingerprint.removeprefix('sha256:')}"
         reusable = _is_reusable(record, run_id)
-        run_descriptor, run_temp_name = tempfile.mkstemp(
-            prefix=f".{run_path.name}.", suffix=".candidate", dir=run_directory
-        )
-        run_temp = Path(run_temp_name)
-        with os.fdopen(run_descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            _write_event(stream, {"type": "command", "command_id": command_id,
-                                  "command": "catalog analyze", "started_at": _now()})
-            if reusable:
-                _write_event(stream, {"type": "asset_stage", "asset_id": asset_id,
-                                      "stage": "vision", "attempt": 1,
-                                      "outcome": "skipped", "run_id": run_id,
-                                      "fingerprint": fingerprint, "usage": {},
-                                      "derivative_sha256": derivative.sha256,
-                                      "started_at": _now(), "ended_at": _now()})
-                _write_event(stream, {"type": "command_completed", "outcome": "succeeded",
-                                      "succeeded": 0, "reused": 1, "failed": 0, "ended_at": _now()})
-                os.replace(run_temp, run_path)
-                run_temp = None
-                return AnalysisResult(0, 1, 0)
-            response = adapter.analyze(asset, derivative, schema, settings)
-            response_usage = response.usage
-            if response.refusal is not None or response.candidate is None:
-                raise CatalogProblem("VISION_ADAPTER_REFUSAL", "adapter refused the request")
-            claims = _candidate(response.candidate, run_id)
-            runs = dict(cast(dict[str, object], record.get("runs", {})))
-            runs[run_id] = {
-                "kind": "vision",
-                "adapter": adapter.name,
-                "provider": response.provider,
-                "model": settings.model,
-                "prompt_version": settings.prompt_version,
-                "settings": {
-                    "parameters": settings.parameters,
-                    "analysis_input": {
-                        "sha256": derivative.sha256,
-                        "pixel_width": derivative.pixel_width,
-                        "pixel_height": derivative.pixel_height,
-                        "media_type": derivative.media_type,
-                        "recipe_version": derivative.recipe_version,
-                    },
-                    "output_schema_version": schema.version,
-                    "resolved_fields": sorted(claims),
-                    "null_fields": sorted(INFERENCE_KEYS - set(claims)),
-                },
-                "fingerprint": fingerprint,
-                "outcome": "success",
-                "executed_at": _now(),
-            }
-            candidate_record = dict(record)
-            candidate_record["runs"] = runs
-            candidate_record["inferences"] = claims
-            candidate_records = [
-                candidate_record if item["asset_id"] == asset_id else item
-                for item in records
-            ]
-            try:
-                checkpoint_catalog(workspace, candidate_records)
-            except CatalogProblem as problem:
-                raise CatalogProblem(
-                    "VISION_CANDIDATE_INVALID", "candidate failed Inference validation"
-                ) from problem
-            _write_event(stream, {"type": "asset_stage", "asset_id": asset_id,
-                                  "stage": "vision", "attempt": 1,
-                                  "outcome": "succeeded", "run_id": run_id,
-                                  "fingerprint": fingerprint, "usage": response.usage,
-                                  "derivative_sha256": derivative.sha256,
-                                  "started_at": _now(), "ended_at": _now()})
-            _write_event(stream, {"type": "command_completed", "outcome": "succeeded",
-                                  "succeeded": 1, "reused": 0, "failed": 0, "ended_at": _now()})
-        os.replace(run_temp, run_path)
-        run_temp = None
-        return AnalysisResult(1, 0, 0)
-    except CatalogProblem as problem:
-        if run_temp is not None and run_temp.is_file():
-            try:
-                with run_temp.open("a", encoding="utf-8", newline="\n") as stream:
-                    failure: dict[str, object] = {
+        if reusable:
+            _remove_derivative(derivative_path)
+            derivative_path = None
+            _append_and_publish_run(
+                run_temp,
+                run_path,
+                [
+                    {
                         "type": "asset_stage",
                         "asset_id": asset_id,
                         "stage": "vision",
-                        "attempt": 1,
-                        "outcome": "permanent_failure",
-                        "error_code": problem.code,
-                        "retryable": False,
-                        "usage": response_usage,
+                        "attempt": 0,
+                        "outcome": "skipped",
+                        "run_id": run_id,
+                        "fingerprint": fingerprint,
+                        "usage": {},
+                        "derivative_sha256": derivative.sha256,
                         "started_at": _now(),
                         "ended_at": _now(),
-                    }
-                    if derivative is not None:
-                        failure["derivative_sha256"] = derivative.sha256
-                    _write_event(stream, failure)
-                    _write_event(
-                        stream,
-                        {
-                            "type": "command_completed",
-                            "outcome": "partial_failure",
-                            "succeeded": 0,
-                            "reused": 0,
-                            "failed": 1,
-                            "ended_at": _now(),
-                        },
-                    )
-                os.replace(run_temp, run_path)
-                run_temp = None
-            except OSError as error:
-                raise CatalogProblem(
-                    "VISION_IO_ERROR", "vision failure could not be recorded"
-                ) from error
-        raise
+                    },
+                    {
+                        "type": "command_completed",
+                        "outcome": "succeeded",
+                        "succeeded": 0,
+                        "reused": 1,
+                        "failed": 0,
+                        "ended_at": _now(),
+                    },
+                ],
+            )
+            run_temp = None
+            return AnalysisResult(0, 1, 0)
+        try:
+            adapter_attempted = True
+            response = adapter.analyze(derivative, schema, settings)
+        except Exception as error:
+            failure_retryable = True
+            failure_category = "adapter_exception"
+            raise CatalogProblem(
+                "VISION_ADAPTER_FAILURE", "vision adapter raised an unexpected error"
+            ) from error
+        response_usage = response.usage or {}
+        provider_metadata = response.provider_metadata or {}
+        if isinstance(response, AdapterFailure):
+            failure_retryable = response.retryable
+            failure_category = response.category
+            code = (
+                "VISION_ADAPTER_REFUSAL"
+                if response.category == "refusal"
+                else "VISION_ADAPTER_FAILURE"
+            )
+            raise CatalogProblem(code, response.message)
+        failure_category = "invalid_candidate"
+        claims = _candidate(response.candidate, run_id)
+        previous_runs = cast(dict[str, object], record.get("runs", {}))
+        runs = {
+            prior_id: prior
+            for prior_id, prior in previous_runs.items()
+            if not isinstance(prior, dict) or prior.get("kind") != "vision"
+        }
+        runs[run_id] = {
+            "kind": "vision",
+            "adapter": adapter.name,
+            "provider": adapter.provider,
+            "model": settings.model,
+            "prompt_version": settings.prompt_version,
+            "settings": {
+                "parameters": settings.parameters,
+                "analysis_input": {
+                    "sha256": derivative.sha256,
+                    "pixel_width": derivative.pixel_width,
+                    "pixel_height": derivative.pixel_height,
+                    "media_type": derivative.media_type,
+                    "recipe_version": derivative.recipe_version,
+                },
+                "output_schema_version": schema.version,
+                "resolved_fields": sorted(claims),
+                "null_fields": sorted(INFERENCE_KEYS - set(claims)),
+            },
+            "fingerprint": fingerprint,
+            "outcome": "success",
+            "executed_at": _now(),
+        }
+        candidate_record = dict(record)
+        candidate_record["runs"] = runs
+        candidate_record["inferences"] = claims
+        candidate_records = [
+            candidate_record if item["asset_id"] == asset_id else item for item in records
+        ]
+        _remove_derivative(derivative_path)
+        derivative_path = None
+        try:
+            checkpoint_catalog(workspace, candidate_records)
+        except CatalogProblem as problem:
+            raise CatalogProblem(
+                "VISION_CANDIDATE_INVALID", "candidate failed Inference validation"
+            ) from problem
+        _append_and_publish_run(
+            run_temp,
+            run_path,
+            [
+                {
+                    "type": "asset_stage",
+                    "asset_id": asset_id,
+                    "stage": "vision",
+                    "attempt": 1,
+                    "outcome": "succeeded",
+                    "run_id": run_id,
+                    "fingerprint": fingerprint,
+                    "usage": response_usage,
+                    "provider_metadata": provider_metadata,
+                    "derivative_sha256": derivative.sha256,
+                    "started_at": _now(),
+                    "ended_at": _now(),
+                },
+                {
+                    "type": "command_completed",
+                    "outcome": "succeeded",
+                    "succeeded": 1,
+                    "reused": 0,
+                    "failed": 0,
+                    "ended_at": _now(),
+                },
+            ],
+        )
+        run_temp = None
+        return AnalysisResult(1, 0, 0)
+    except CatalogProblem as problem:
+        if problem.code == "VISION_INPUT_CLEANUP_FAILED":
+            failure_category = "cleanup"
+        if derivative_path is not None and problem.code != "VISION_INPUT_CLEANUP_FAILED":
+            try:
+                _remove_derivative(derivative_path)
+                derivative_path = None
+            except CatalogProblem as cleanup_problem:
+                problem = cleanup_problem
+                failure_retryable = False
+                failure_category = "cleanup"
+        if run_temp is not None and run_temp.is_file():
+            failure: dict[str, object] = {
+                "type": "asset_stage",
+                "asset_id": asset_id,
+                "stage": "vision",
+                "attempt": 1 if adapter_attempted else 0,
+                "outcome": "transient_failure" if failure_retryable else "permanent_failure",
+                "failure_category": failure_category,
+                "error_code": problem.code,
+                "retryable": failure_retryable,
+                "usage": response_usage,
+                "provider_metadata": provider_metadata,
+                "started_at": _now(),
+                "ended_at": _now(),
+            }
+            if derivative is not None:
+                failure["derivative_sha256"] = derivative.sha256
+            _append_and_publish_run(
+                run_temp,
+                run_path,
+                [
+                    failure,
+                    {
+                        "type": "command_completed",
+                        "outcome": "partial_failure",
+                        "succeeded": 0,
+                        "reused": 0,
+                        "failed": 1,
+                        "ended_at": _now(),
+                    },
+                ],
+            )
+            run_temp = None
+        raise problem
     except OSError as error:
         raise CatalogProblem(
             "VISION_IO_ERROR", "vision analysis artifact could not be written"
         ) from error
     finally:
-        if derivative_path is not None:
-            with suppress(OSError):
-                derivative_path.unlink(missing_ok=True)
         if run_temp is not None:
             with suppress(OSError):
                 run_temp.unlink(missing_ok=True)

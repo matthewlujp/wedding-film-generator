@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,9 +10,15 @@ from pathlib import Path
 from PIL import Image, ImageCms
 
 
-def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     executable = Path(sys.executable).with_name("wedding-film")
-    return subprocess.run([str(executable), *args], check=False, capture_output=True, text=True)
+    return subprocess.run(
+        [str(executable), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+    )
 
 
 def configured_workspace(tmp_path: Path, *, model: str = "fixture-v1") -> tuple[Path, str]:
@@ -145,21 +152,27 @@ def test_identical_contract_reuses_and_model_change_is_stale(tmp_path: Path) -> 
     assert stale.returncode == 0, stale.stderr
     changed = json.loads((workspace / "catalog.jsonl").read_text())
     assert changed["inferences"]["description"]["run_id"] != first_run_id
-    assert changed["runs"][first_run_id]["outcome"] == "success"
+    assert first_run_id not in changed["runs"]
 
 
 def test_invalid_complete_candidate_and_refusal_merge_nothing(tmp_path: Path) -> None:
-    for model in (
-        "fixture-refusal", "fixture-incomplete", "fixture-invalid-enum",
-        "fixture-invalid-confidence", "fixture-empty",
-    ):
+    cases = {
+        "fixture-refusal": "VISION_ADAPTER_REFUSAL",
+        "fixture-incomplete": "VISION_CANDIDATE_INCOMPLETE",
+        "fixture-invalid-enum": "VISION_CANDIDATE_INVALID",
+        "fixture-invalid-confidence": "VISION_CANDIDATE_CONFIDENCE",
+        "fixture-empty": "VISION_CANDIDATE_INCOMPLETE",
+        "fixture-malformed-claim": "VISION_CANDIDATE_SCHEMA",
+        "fixture-invalid-type": "VISION_CANDIDATE_INVALID",
+    }
+    for model, expected_code in cases.items():
         workspace, asset_id = configured_workspace(tmp_path / model, model=model)
         before = (workspace / "catalog.jsonl").read_bytes()
         result = run_cli(
             "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
         )
         assert result.returncode == 1
-        assert "VISION_" in result.stderr
+        assert expected_code in result.stderr
         assert "Traceback" not in result.stderr
         assert (workspace / "catalog.jsonl").read_bytes() == before
         assert list((workspace / ".work" / "candidates").iterdir()) == []
@@ -169,10 +182,85 @@ def test_invalid_complete_candidate_and_refusal_merge_nothing(tmp_path: Path) ->
         assert isinstance(failure["usage"], dict)
 
 
+def test_decode_failure_is_recorded_after_analysis_run_starts(tmp_path: Path) -> None:
+    workspace = tmp_path / "decode-failure"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    config = workspace / "project.yaml"
+    config.write_text(
+        config.read_text().replace(
+            "name: none\n    model: none", "name: fake\n    model: fixture-v1", 1
+        )
+    )
+    materials = workspace / "materials"
+    materials.mkdir()
+    (materials / "broken.jpg").write_bytes(b"not-an-image")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = workspace / "catalog.jsonl"
+    asset_id = json.loads(catalog.read_text())["asset_id"]
+    before = catalog.read_bytes()
+
+    result = run_cli(
+        "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
+    )
+
+    assert result.returncode == 1
+    assert "VISION_INPUT_INVALID" in result.stderr
+    assert catalog.read_bytes() == before
+    failure = _vision_event(workspace)
+    assert failure["error_code"] == "VISION_INPUT_INVALID"
+    assert failure["outcome"] == "permanent_failure"
+    assert list((workspace / ".work" / "candidates").iterdir()) == []
+
+
+def test_adapter_failure_preserves_category_retryability_usage_and_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace, asset_id = configured_workspace(tmp_path, model="fixture-transient-failure")
+    result = run_cli(
+        "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
+    )
+
+    assert result.returncode == 1
+    assert "VISION_ADAPTER_FAILURE" in result.stderr
+    failure = _vision_event(workspace)
+    assert failure["outcome"] == "transient_failure"
+    assert failure["failure_category"] == "provider_unavailable"
+    assert failure["retryable"] is True
+    assert failure["usage"] == {"input_images": 1}
+    assert failure["provider_metadata"] == {"fixture": "fixture-transient-failure"}
+
+
+def test_cleanup_failure_is_recorded_and_prevents_catalog_publish(tmp_path: Path) -> None:
+    workspace, asset_id = configured_workspace(tmp_path)
+    catalog = workspace / "catalog.jsonl"
+    before = catalog.read_bytes()
+
+    result = run_cli(
+        "--project",
+        str(workspace),
+        "catalog",
+        "analyze",
+        "--asset-id",
+        asset_id,
+        env={"WEDDING_FILM_TEST_FAIL_DERIVATIVE_CLEANUP": "1"},
+    )
+
+    assert result.returncode == 1
+    assert "VISION_INPUT_CLEANUP_FAILED" in result.stderr
+    assert catalog.read_bytes() == before
+    failure = _vision_event(workspace)
+    assert failure["error_code"] == "VISION_INPUT_CLEANUP_FAILED"
+    assert failure["retryable"] is False
+    derivatives = list((workspace / ".work" / "candidates").glob(".analysis-input-*.jpg"))
+    assert len(derivatives) == 1
+    derivatives[0].unlink()
+
+
 def test_null_removes_field_empty_lists_complete_and_unrelated_catalog_data_survives(
     tmp_path: Path,
 ) -> None:
     workspace, asset_id = configured_workspace(tmp_path)
+    assert run_cli("--project", str(workspace), "catalog", "extract").returncode == 0
     assert run_cli(
         "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
     ).returncode == 0
@@ -195,3 +283,10 @@ def test_null_removes_field_empty_lists_complete_and_unrelated_catalog_data_surv
     assert "setting" not in updated["inferences"]
     assert updated["inferences"]["quality_flags"]["value"] == []
     assert updated["corrections"] == record["corrections"]
+    assert updated["observations"] == record["observations"]
+    extraction_run_ids = {
+        run_id for run_id, run in updated["runs"].items() if run["kind"] == "extraction"
+    }
+    assert extraction_run_ids == {
+        claim["run_id"] for claim in updated["observations"].values()
+    }
