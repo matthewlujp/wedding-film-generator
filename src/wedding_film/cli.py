@@ -14,6 +14,7 @@ import yaml
 
 from wedding_film.catalog import CatalogProblem, scan_catalog
 from wedding_film.status import write_status
+from wedding_film.story import write_story_validation
 from wedding_film.workspace import unsafe_destination_reason
 
 SUCCESS = 0
@@ -150,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_commands.add_parser("scan")
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
+    validate = commands.add_parser("validate")
+    validate.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -162,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             return scan(arguments.project)
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
+        if arguments.command == "validate":
+            return write_story_validation(arguments.project, arguments.as_json)
         return INVALID_OR_PREFLIGHT
     except KeyboardInterrupt:
         return INTERRUPTED

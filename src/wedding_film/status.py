@@ -18,6 +18,7 @@ from wedding_film.config import (
     ProjectConfig,
     load_project_config,
 )
+from wedding_film.story import validate_story
 from wedding_film.workspace import unsafe_destination_reason
 
 State = Literal["missing", "invalid", "stale", "ready", "complete-with-warnings"]
@@ -376,6 +377,48 @@ def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
     )
 
 
+def _story_fact(workspace: Path, dependencies: dict[str, tuple[Path, Fact]]) -> Fact:
+    artifact = workspace / "story.md"
+    hashes, hash_error = _current_hashes(
+        {key: value[0] for key, value in dependencies.items()}, "STORY", "story"
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact,
+        "STORY",
+        "story",
+        {key: value[1] for key, value in dependencies.items()},
+        hashes,
+    )
+    if preflight is not None and preflight["state"] != "stale":
+        return preflight
+    diagnostics = validate_story(artifact)
+    if diagnostics:
+        problem = diagnostics[0]
+        return _fact(
+            "invalid",
+            problem["code"],
+            f"location={problem['location']} {problem['message']}",
+            [str(artifact)],
+            phase="story",
+            upstream_hashes=hashes,
+            next_commands=[_command(workspace, "validate")],
+        )
+    if preflight is not None:
+        preflight["next_commands"] = [_command(workspace, "validate")]
+        return preflight
+    return _fact(
+        "ready",
+        "STORY_VALID",
+        "story.md is structurally valid",
+        [str(artifact)],
+        phase="story",
+        upstream_hashes=hashes,
+        next_commands=[_command(workspace, "validate")],
+    )
+
+
 def _expected_storyboard_frames(storyboard: Path) -> int | None:
     try:
         loaded = yaml.safe_load(storyboard.read_text(encoding="utf-8"))
@@ -525,10 +568,8 @@ def derive_status(workspace: Path) -> StatusPayload:
     storyboard_path = workspace / "storyboard.yaml"
     materials = _materials_fact(workspace)
     catalog = _catalog_fact(workspace, materials)
-    story = _canonical_fact(
+    story = _story_fact(
         workspace,
-        "story",
-        "story.md",
         {"semantic_catalog": (catalog_path, catalog)},
     )
     script = _canonical_fact(

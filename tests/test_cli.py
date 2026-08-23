@@ -242,7 +242,7 @@ def test_status_rejects_unknown_adapter_names(tmp_path: Path) -> None:
     assert configuration["reasons"][0]["code"] == "CONFIG_UNKNOWN_ADAPTER"
 
 
-def test_status_reports_stale_unvalidated_artifacts_and_missing_tools(
+def test_status_reports_invalid_story_and_missing_tools(
     tmp_path: Path,
 ) -> None:
     stale_workspace = tmp_path / "stale"
@@ -251,8 +251,10 @@ def test_status_reports_stale_unvalidated_artifacts_and_missing_tools(
     stale = json.loads(
         run_cli("--project", str(stale_workspace), "status", "--json").stdout
     )
-    assert stale["layers"]["story"]["state"] == "stale"
-    assert stale["layers"]["story"]["reasons"][0]["code"] == "STORY_UPSTREAM_NOT_READY"
+    assert stale["layers"]["story"]["state"] == "invalid"
+    assert stale["layers"]["story"]["reasons"][0]["code"] == (
+        "STORY_FRONTMATTER_INVALID"
+    )
 
     complete_workspace = tmp_path / "complete"
     assert run_cli("--project", str(complete_workspace), "project", "init").returncode == 0
