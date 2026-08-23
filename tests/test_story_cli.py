@@ -470,7 +470,7 @@ def test_validate_reports_stable_human_and_json_diagnostics(tmp_path: Path) -> N
     assert f"code={diagnostic['code']}" in human.stdout
 
 
-def test_validate_preserves_every_canonical_source_and_requires_only_story(
+def test_validate_preserves_every_canonical_source_and_checks_present_script(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "isolated-story"
@@ -486,7 +486,8 @@ def test_validate_preserves_every_canonical_source_and_requires_only_story(
 
     result = run_cli("--project", str(workspace), "validate", "--json")
 
-    assert result.returncode == 0, result.stdout
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["diagnostics"][0]["code"] == "SCRIPT_FRONTMATTER_INVALID"
     assert {
         filename: (workspace / filename).read_text(encoding="utf-8") for filename in canonical
     } == canonical
