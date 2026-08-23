@@ -412,6 +412,17 @@ def validate_story(path: Path) -> list[Diagnostic]:
     return []
 
 
+def story_moment_ids(path: Path) -> set[str]:
+    """Return Moment IDs from an already validated Story document."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    closing = lines.index("---", 1)
+    return {
+        match.group(1)
+        for _, line in _markdown_structure(lines, closing + 1)
+        if (match := _MOMENT.fullmatch(line))
+    }
+
+
 def _diagnostic(path: Path, code: str, location: str, message: str) -> Diagnostic:
     return {"artifact": str(path), "code": code, "location": location, "message": message}
 

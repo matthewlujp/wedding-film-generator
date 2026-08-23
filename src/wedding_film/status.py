@@ -18,6 +18,7 @@ from wedding_film.config import (
     ProjectConfig,
     load_project_config,
 )
+from wedding_film.script import validate_script
 from wedding_film.story import validate_story
 from wedding_film.workspace import unsafe_destination_reason
 
@@ -419,6 +420,60 @@ def _story_fact(workspace: Path, dependencies: dict[str, tuple[Path, Fact]]) -> 
     )
 
 
+def _script_fact(workspace: Path, story_path: Path, story: Fact) -> Fact:
+    artifact = workspace / "script.md"
+    hashes, hash_error = _current_hashes({"story": story_path}, "SCRIPT", "script")
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact,
+        "SCRIPT",
+        "script",
+        {"story": story},
+        hashes,
+    )
+    if preflight is not None:
+        if preflight["state"] != "missing":
+            preflight["next_commands"] = [_command(workspace, "script validate")]
+        return preflight
+    _, diagnostics, validation_warnings = validate_script(artifact, story_path)
+    if diagnostics:
+        problem = diagnostics[0]
+        return _fact(
+            "invalid",
+            problem["code"],
+            f"location={problem['location']} {problem['message']}",
+            [str(artifact)],
+            phase="script",
+            upstream_hashes=hashes,
+            next_commands=[_command(workspace, "script validate")],
+        )
+    warnings: list[StatusMessage] = [
+        {"code": warning["code"], "message": warning["message"]}
+        for warning in validation_warnings
+    ]
+    if warnings:
+        return _fact(
+            "complete-with-warnings",
+            "SCRIPT_VALID_WITH_WARNINGS",
+            "script.md is structurally valid with provenance warnings",
+            [str(artifact)],
+            phase="script",
+            upstream_hashes=hashes,
+            warnings=warnings,
+            next_commands=[_command(workspace, "script validate")],
+        )
+    return _fact(
+        "ready",
+        "SCRIPT_VALID",
+        "script.md is structurally and cross-reference valid",
+        [str(artifact)],
+        phase="script",
+        upstream_hashes=hashes,
+        next_commands=[_command(workspace, "script validate")],
+    )
+
+
 def _expected_storyboard_frames(storyboard: Path) -> int | None:
     try:
         loaded = yaml.safe_load(storyboard.read_text(encoding="utf-8"))
@@ -572,12 +627,7 @@ def derive_status(workspace: Path) -> StatusPayload:
         workspace,
         {"semantic_catalog": (catalog_path, catalog)},
     )
-    script = _canonical_fact(
-        workspace,
-        "script",
-        "script.md",
-        {"story": (story_path, story)},
-    )
+    script = _script_fact(workspace, story_path, story)
     storyboard = _canonical_fact(
         workspace,
         "storyboard",

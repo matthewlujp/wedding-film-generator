@@ -44,8 +44,8 @@ def test_validate_accepts_a_unicode_markdown_story_deterministically(tmp_path: P
     story = workspace / "story.md"
     story.write_text(valid_story(), encoding="utf-8")
 
-    first = run_cli("--project", str(workspace), "validate", "--json")
-    second = run_cli("--project", str(workspace), "validate", "--json")
+    first = run_cli("--project", str(workspace), "story", "validate", "--json")
+    second = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert first.returncode == second.returncode == 0, first.stderr
     assert first.stdout == second.stdout
@@ -69,7 +69,7 @@ def test_validate_treats_headings_in_fenced_code_as_ordinary_markdown(tmp_path: 
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -87,7 +87,7 @@ def test_validate_keeps_html_comment_openers_literal_inside_fenced_code(
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -110,7 +110,7 @@ def test_validate_ignores_headings_inside_closed_and_unterminated_html_comments(
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -125,7 +125,7 @@ def test_validate_counts_markdown_autolinks_as_visible_prose(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -143,7 +143,7 @@ def test_validate_counts_link_labels_but_not_link_metadata_as_visible_prose(
         encoding="utf-8",
     )
 
-    visible = run_cli("--project", str(visible_workspace), "validate", "--json")
+    visible = run_cli("--project", str(visible_workspace), "story", "validate", "--json")
 
     assert visible.returncode == 0, visible.stdout
 
@@ -161,7 +161,7 @@ def test_validate_counts_link_labels_but_not_link_metadata_as_visible_prose(
             encoding="utf-8",
         )
 
-        result = run_cli("--project", str(workspace), "validate", "--json")
+        result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
         assert result.returncode == 1
         diagnostic = json.loads(result.stdout)["diagnostics"][0]
@@ -185,7 +185,7 @@ def test_validate_accepts_markdown_headings_indented_by_up_to_three_spaces(
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -198,7 +198,7 @@ def test_validate_rejects_four_space_heading_indentation(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 1
     assert json.loads(result.stdout)["diagnostics"][0]["code"] == "STORY_SECTION_ORDER"
@@ -236,7 +236,7 @@ def test_validate_rejects_non_strict_or_unsupported_frontmatter(tmp_path: Path) 
         workspace.mkdir()
         (workspace / "story.md").write_text(valid_story().replace(old, new), encoding="utf-8")
 
-        result = run_cli("--project", str(workspace), "validate", "--json")
+        result = run_cli("--project", str(workspace), "story", "validate", "--json")
         diagnostic = json.loads(result.stdout)["diagnostics"][0]
 
         assert result.returncode == 1
@@ -253,7 +253,7 @@ def test_validate_accepts_positive_finite_decimal_target_duration(tmp_path: Path
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 0, result.stdout
 
@@ -269,7 +269,7 @@ def test_validate_rejects_non_finite_and_boolean_target_durations(tmp_path: Path
             encoding="utf-8",
         )
 
-        result = run_cli("--project", str(workspace), "validate", "--json")
+        result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
         assert result.returncode == 1
         diagnostic = json.loads(result.stdout)["diagnostics"][0]
@@ -290,7 +290,7 @@ def test_validate_handles_arbitrary_size_integer_target_durations_without_a_trac
         encoding="utf-8",
     )
 
-    valid = run_cli("--project", str(valid_workspace), "validate", "--json")
+    valid = run_cli("--project", str(valid_workspace), "story", "validate", "--json")
 
     assert valid.returncode == 0, valid.stderr
     assert "Traceback" not in valid.stderr
@@ -305,7 +305,7 @@ def test_validate_handles_arbitrary_size_integer_target_durations_without_a_trac
         encoding="utf-8",
     )
 
-    invalid = run_cli("--project", str(invalid_workspace), "validate", "--json")
+    invalid = run_cli("--project", str(invalid_workspace), "story", "validate", "--json")
 
     assert invalid.returncode == 1
     assert "Traceback" not in invalid.stderr
@@ -323,7 +323,7 @@ def test_validate_reports_malformed_yaml_without_a_traceback(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    result = run_cli("--project", str(workspace), "validate", "--json")
+    result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
     assert result.returncode == 1
     assert "Traceback" not in result.stderr
@@ -374,7 +374,7 @@ def test_validate_rejects_invalid_section_and_moment_structure(tmp_path: Path) -
         story = workspace / "story.md"
         story.write_text(contents, encoding="utf-8")
 
-        result = run_cli("--project", str(workspace), "validate", "--json")
+        result = run_cli("--project", str(workspace), "story", "validate", "--json")
         diagnostic = json.loads(result.stdout)["diagnostics"][0]
 
         assert result.returncode == 1
@@ -435,7 +435,7 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
         workspace.mkdir()
         (workspace / "story.md").write_text(contents, encoding="utf-8")
 
-        result = run_cli("--project", str(workspace), "validate", "--json")
+        result = run_cli("--project", str(workspace), "story", "validate", "--json")
 
         assert result.returncode == 1
         assert json.loads(result.stdout)["diagnostics"][0]["code"] == code
@@ -444,7 +444,7 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
 def test_validate_reports_stable_human_and_json_diagnostics(tmp_path: Path) -> None:
     missing_workspace = tmp_path / "missing"
     missing_workspace.mkdir()
-    missing = run_cli("--project", str(missing_workspace), "validate", "--json")
+    missing = run_cli("--project", str(missing_workspace), "story", "validate", "--json")
 
     invalid_workspace = tmp_path / "invalid"
     invalid_workspace.mkdir()
@@ -453,8 +453,8 @@ def test_validate_reports_stable_human_and_json_diagnostics(tmp_path: Path) -> N
         valid_story().replace("### getting-ready", "### Getting_ready"),
         encoding="utf-8",
     )
-    human = run_cli("--project", str(invalid_workspace), "validate")
-    machine = run_cli("--project", str(invalid_workspace), "validate", "--json")
+    human = run_cli("--project", str(invalid_workspace), "story", "validate")
+    machine = run_cli("--project", str(invalid_workspace), "story", "validate", "--json")
     diagnostic = json.loads(machine.stdout)["diagnostics"][0]
 
     assert missing.returncode == 1
@@ -470,7 +470,7 @@ def test_validate_reports_stable_human_and_json_diagnostics(tmp_path: Path) -> N
     assert f"code={diagnostic['code']}" in human.stdout
 
 
-def test_validate_preserves_every_canonical_source_and_requires_only_story(
+def test_validate_preserves_every_canonical_source_and_checks_present_script(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "isolated-story"
@@ -486,7 +486,8 @@ def test_validate_preserves_every_canonical_source_and_requires_only_story(
 
     result = run_cli("--project", str(workspace), "validate", "--json")
 
-    assert result.returncode == 0, result.stdout
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["diagnostics"][0]["code"] == "SCRIPT_FRONTMATTER_INVALID"
     assert {
         filename: (workspace / filename).read_text(encoding="utf-8") for filename in canonical
     } == canonical
