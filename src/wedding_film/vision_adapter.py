@@ -42,6 +42,7 @@ class AdapterSettings:
 @dataclass(frozen=True)
 class AdapterSuccess:
     outcome: Literal["success"]
+    adapter_version: str
     candidate: object
     usage: dict[str, int] | None = None
     provider_metadata: dict[str, object] | None = None
@@ -50,6 +51,7 @@ class AdapterSuccess:
 @dataclass(frozen=True)
 class AdapterFailure:
     outcome: Literal["failure"]
+    adapter_version: str
     category: AdapterFailureCategory
     retryable: bool
     message: str
@@ -63,6 +65,7 @@ AdapterResult = AdapterSuccess | AdapterFailure
 class VisionAdapter(Protocol):
     name: str
     provider: str
+    version: str
 
     def analyze(
         self,
@@ -77,6 +80,7 @@ class FakeVisionAdapter:
 
     name = "fake"
     provider = "deterministic-fake"
+    version = "1"
 
     def analyze(
         self,
@@ -88,6 +92,7 @@ class FakeVisionAdapter:
         if not _supports_candidate_schema(schema):
             return AdapterFailure(
                 outcome="failure",
+                adapter_version=self.version,
                 category="unsupported_schema",
                 retryable=False,
                 message="fake adapter does not support the requested output schema",
@@ -105,6 +110,7 @@ class FakeVisionAdapter:
         if model == "fixture-refusal":
             return AdapterFailure(
                 outcome="failure",
+                adapter_version=self.version,
                 category="refusal",
                 retryable=False,
                 message="fixture refusal",
@@ -112,12 +118,15 @@ class FakeVisionAdapter:
         if model == "fixture-transient-failure":
             return AdapterFailure(
                 outcome="failure",
+                adapter_version=self.version,
                 category="provider_unavailable",
                 retryable=True,
                 message="fixture provider is temporarily unavailable",
                 usage={"input_images": 1},
                 provider_metadata={"fixture": model},
             )
+        if model == "fixture-interrupt":
+            raise KeyboardInterrupt
         if model == "fixture-incomplete":
             candidate.pop("setting")
         elif model == "fixture-invalid-enum":
@@ -134,6 +143,7 @@ class FakeVisionAdapter:
             candidate["setting"] = {"value": None, "confidence": 0.7}
         return AdapterSuccess(
             outcome="success",
+            adapter_version=self.version,
             candidate=candidate,
             usage={"input_images": 1, "output_fields": len(candidate)},
             provider_metadata={"fixture": model},

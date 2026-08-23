@@ -58,10 +58,14 @@ def test_analyze_one_asset_merges_complete_fake_snapshot_with_provenance(tmp_pat
     run = record["runs"][run_id]
     assert run["kind"] == "vision"
     assert run["adapter"] == "fake"
+    assert run["version"] == "1"
     assert run["provider"] == "deterministic-fake"
     assert run["model"] == "fixture-v1"
     assert run["fingerprint"].startswith("sha256:")
     derivative = run["settings"]["analysis_input"]
+    assert run["settings"]["adapter_version"] == "1"
+    assert run["settings"]["output_schema_sha256"].startswith("sha256:")
+    assert run["settings"]["prompt_sha256"].startswith("sha256:")
     assert derivative == {
         "sha256": derivative["sha256"],
         "pixel_width": 12,
@@ -77,6 +81,10 @@ def test_analyze_one_asset_merges_complete_fake_snapshot_with_provenance(tmp_pat
         .splitlines()
     ]
     success = next(event for event in events if event["type"] == "asset_stage")
+    assert [event["type"] for event in events] == [
+        "command", "catalog_checkpoint", "asset_stage", "command_completed"
+    ]
+    assert events[0]["started_at"] <= success["started_at"] <= success["ended_at"]
     assert success["usage"] == {"input_images": 1, "output_fields": 7}
     assert success["derivative_sha256"] == derivative["sha256"]
     assert list((workspace / ".work" / "candidates").iterdir()) == []
@@ -209,7 +217,9 @@ def test_decode_failure_is_recorded_after_analysis_run_starts(tmp_path: Path) ->
     failure = _vision_event(workspace)
     assert failure["error_code"] == "VISION_INPUT_INVALID"
     assert failure["outcome"] == "permanent_failure"
+    assert failure["started_at"] <= failure["ended_at"]
     assert list((workspace / ".work" / "candidates").iterdir()) == []
+    assert list((workspace / "runs" / "analysis").glob(".*.candidate")) == []
 
 
 def test_adapter_failure_preserves_category_retryability_usage_and_metadata(
@@ -254,6 +264,51 @@ def test_cleanup_failure_is_recorded_and_prevents_catalog_publish(tmp_path: Path
     derivatives = list((workspace / ".work" / "candidates").glob(".analysis-input-*.jpg"))
     assert len(derivatives) == 1
     derivatives[0].unlink()
+
+
+def test_interrupt_is_journaled_returns_130_and_cleans_derivative(tmp_path: Path) -> None:
+    workspace, asset_id = configured_workspace(tmp_path, model="fixture-interrupt")
+    catalog = workspace / "catalog.jsonl"
+    before = catalog.read_bytes()
+
+    result = run_cli(
+        "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
+    )
+
+    assert result.returncode == 130
+    assert catalog.read_bytes() == before
+    event = _vision_event(workspace)
+    assert event["outcome"] == "interrupted"
+    assert event["error_code"] == "VISION_INTERRUPTED"
+    assert event["started_at"] <= event["ended_at"]
+    assert list((workspace / ".work" / "candidates").iterdir()) == []
+
+
+def test_malformed_or_legacy_success_provenance_is_not_reused(tmp_path: Path) -> None:
+    mutations = (
+        lambda run: run.__setitem__("version", "legacy"),
+        lambda run: run.__setitem__("fingerprint", "sha256:" + "0" * 64),
+        lambda run: run["settings"].pop("analysis_input"),
+        lambda run: run["settings"].pop("output_schema_sha256"),
+        lambda run: run["settings"].pop("adapter_version"),
+    )
+    for index, mutate in enumerate(mutations):
+        workspace, asset_id = configured_workspace(tmp_path / str(index))
+        assert run_cli(
+            "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
+        ).returncode == 0
+        catalog = workspace / "catalog.jsonl"
+        record = json.loads(catalog.read_text())
+        run_id = record["inferences"]["description"]["run_id"]
+        mutate(record["runs"][run_id])
+        catalog.write_text(json.dumps(record, separators=(",", ":")) + "\n")
+
+        result = run_cli(
+            "--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "succeeded=1 reused=0" in result.stdout
 
 
 def test_null_removes_field_empty_lists_complete_and_unrelated_catalog_data_survives(
