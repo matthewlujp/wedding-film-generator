@@ -75,6 +75,7 @@ RUN_KEYS = (
     "model",
     "prompt_version",
     "settings",
+    "fingerprint",
     "outcome",
     "executed_at",
 )
@@ -222,6 +223,10 @@ def _validate_runs(value: object) -> JsonObject:
                 raise _problem(
                     "CATALOG_PROVENANCE_INVALID", "vision provenance is incomplete"
                 )
+            if "fingerprint" in run:
+                fingerprint = _string(run["fingerprint"])
+                if not ASSET_ID_PATTERN.fullmatch(fingerprint):
+                    raise _problem("CATALOG_PROVENANCE_INVALID", "vision fingerprint is invalid")
         else:
             raise _problem(
                 "CATALOG_PROVENANCE_INVALID", "catalog run kind is unsupported"
