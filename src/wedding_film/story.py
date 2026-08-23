@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import math
 import re
@@ -27,7 +28,7 @@ _SECTION = re.compile(r"^ {0,3}## (.+)$")
 _MOMENT = re.compile(r"^ {0,3}### (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_COMMENT = re.compile(r"<!--(?:.*?-->|.*\Z)", re.DOTALL)
 _HTML_TAG = re.compile(r"<[^>]+>")
 
 
@@ -115,7 +116,7 @@ def _has_visible_prose(lines: list[str]) -> bool:
                 fence_length = len(marker)
                 continue
         content.append(line)
-    visible = _HTML_TAG.sub("", "\n".join(content))
+    visible = html.unescape(_HTML_TAG.sub("", "\n".join(content)))
     visible = re.sub(r"[\s*_~`#>\[\](){}.!:+\\|=-]", "", visible)
     return bool(visible)
 

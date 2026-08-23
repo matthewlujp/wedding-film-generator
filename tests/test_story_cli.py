@@ -258,11 +258,22 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
             base.replace("二人の歩みと **家族への感謝** を伝える。", "<!-- author note only -->"),
             "STORY_SECTION_EMPTY",
         ),
+        "unfinished-comment-intent": (
+            base.replace(
+                "二人の歩みと **家族への感謝** を伝える。",
+                "<!-- unfinished comment",
+            ),
+            "STORY_SECTION_EMPTY",
+        ),
         "empty-fence-arc": (
             base.replace(
                 "Quiet anticipationから、祝福に満ちた喜びへ。",
                 "```markdown\n\n```",
             ),
+            "STORY_SECTION_EMPTY",
+        ),
+        "non-breaking-space-arc": (
+            base.replace("Quiet anticipationから、祝福に満ちた喜びへ。", "&nbsp;"),
             "STORY_SECTION_EMPTY",
         ),
         "comment-only-moment": (
@@ -271,6 +282,10 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
         ),
         "empty-fence-moment": (
             base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "~~~\n\n~~~"),
+            "STORY_MOMENT_EMPTY",
+        ),
+        "non-breaking-space-moment": (
+            base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "&#160;"),
             "STORY_MOMENT_EMPTY",
         ),
     }
