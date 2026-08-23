@@ -75,6 +75,7 @@ RUN_KEYS = (
     "model",
     "prompt_version",
     "settings",
+    "outcome",
     "executed_at",
 )
 
@@ -181,10 +182,10 @@ def _validate_run_reference(
     if run_id not in runs:
         raise _problem("CATALOG_PROVENANCE_DANGLING", "catalog claim references an absent run")
     run = _object(runs[run_id])
-    if run.get("kind") != expected_kind:
+    if run.get("kind") != expected_kind or run.get("outcome") != "success":
         raise _problem(
             "CATALOG_PROVENANCE_INVALID",
-            "catalog claim references the wrong kind of successful run",
+            "catalog claim must reference a successful run of the correct kind",
         )
     return run_id
 
@@ -201,7 +202,7 @@ def _validate_runs(value: object) -> JsonObject:
             raise _problem("CATALOG_UNKNOWN_FIELD", "catalog run contains an unknown field")
         kind = run.get("kind")
         if kind == "extraction":
-            required = {"kind", "version", "executed_at"}
+            required = {"kind", "version", "outcome", "executed_at"}
             if required - set(run) or not ({"tool", "adapter"} & set(run)):
                 raise _problem(
                     "CATALOG_PROVENANCE_INVALID",
@@ -214,6 +215,7 @@ def _validate_runs(value: object) -> JsonObject:
                 "model",
                 "prompt_version",
                 "settings",
+                "outcome",
                 "executed_at",
             }
             if required - set(run):
@@ -223,6 +225,11 @@ def _validate_runs(value: object) -> JsonObject:
         else:
             raise _problem(
                 "CATALOG_PROVENANCE_INVALID", "catalog run kind is unsupported"
+            )
+        if run.get("outcome") != "success":
+            raise _problem(
+                "CATALOG_PROVENANCE_INVALID",
+                "record-local run provenance must have outcome success",
             )
         for key, item in run.items():
             if key == "settings":
@@ -237,12 +244,12 @@ def _validate_runs(value: object) -> JsonObject:
     return normalized
 
 
-def _number(value: object) -> float:
+def _number(value: object) -> int | float:
     if not isinstance(value, int | float) or isinstance(value, bool):
         raise _problem("CATALOG_FIELD_TYPE", "catalog field must be a finite number")
-    if not math.isfinite(value):
-        raise _problem("CATALOG_FIELD_TYPE", "catalog field must be a finite number")
-    return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise _problem("CATALOG_FIELD_VALUE", "catalog number must be finite")
+    return value
 
 
 def _string_set(value: object) -> list[str]:
@@ -366,12 +373,8 @@ def _validate_inferences(value: object, runs: Mapping[str, object]) -> JsonObjec
         if set(claim) != required:
             code = "CATALOG_MISSING_FIELD" if required - set(claim) else "CATALOG_UNKNOWN_FIELD"
             raise _problem(code, "Inference must contain value, confidence, and run_id")
-        confidence = claim["confidence"]
-        if (
-            type(confidence) not in (int, float)
-            or not math.isfinite(confidence)
-            or not 0 <= confidence <= 1
-        ):
+        confidence = _number(claim["confidence"])
+        if not 0 <= confidence <= 1:
             raise _problem("CATALOG_FIELD_VALUE", "Inference confidence must be finite from 0 to 1")
         normalized[name] = {
             "value": _validate_inference_value(name, claim["value"]),

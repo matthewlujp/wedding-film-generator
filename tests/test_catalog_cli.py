@@ -409,12 +409,40 @@ def test_status_requires_complete_successful_claim_provenance(tmp_path: Path) ->
     assert invalid_fact["state"] == "invalid"
     assert invalid_fact["reasons"][0]["code"] == "CATALOG_PROVENANCE_INVALID"
 
+    extraction = {
+        "kind": "extraction",
+        "tool": "privacy-safe-extractor",
+        "version": "1",
+        "executed_at": "2026-08-23T10:00:00+08:00",
+    }
+    complete_without_outcome = {**base, "runs": {"extract-1": extraction}}
+    catalog.write_text(
+        json.dumps(complete_without_outcome, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    missing_outcome = run_cli("--project", str(workspace), "status", "--json")
+    missing_fact = json.loads(missing_outcome.stdout)["layers"]["semantic_catalog"]
+    assert missing_fact["state"] == "invalid"
+    assert missing_fact["reasons"][0]["code"] == "CATALOG_PROVENANCE_INVALID"
+
+    for outcome in ("failed", "partial"):
+        non_success = {
+            **base,
+            "runs": {"extract-1": {**extraction, "outcome": outcome}},
+        }
+        catalog.write_text(
+            json.dumps(non_success, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        rejected = run_cli("--project", str(workspace), "status", "--json")
+        rejected_fact = json.loads(rejected.stdout)["layers"]["semantic_catalog"]
+        assert rejected_fact["state"] == "invalid"
+        assert rejected_fact["reasons"][0]["code"] == "CATALOG_PROVENANCE_INVALID"
+
     base["runs"] = {
         "extract-1": {
-            "kind": "extraction",
-            "tool": "privacy-safe-extractor",
-            "version": "1",
-            "executed_at": "2026-08-23T10:00:00+08:00",
+            **extraction,
+            "outcome": "success",
         },
         "vision-1": {
             "kind": "vision",
@@ -423,6 +451,7 @@ def test_status_requires_complete_successful_claim_provenance(tmp_path: Path) ->
             "prompt_version": "v1",
             "settings": {},
             "executed_at": "2026-08-23T10:01:00+08:00",
+            "outcome": "success",
         },
     }
     base["inferences"] = {
@@ -452,6 +481,7 @@ def test_status_rejects_mistyped_observation_and_correction_values(tmp_path: Pat
             "tool": "privacy-safe-extractor",
             "version": "1",
             "executed_at": "2026-08-23T10:00:00+08:00",
+            "outcome": "success",
         }
     }
     invalid_observations: list[tuple[str, object]] = [
@@ -461,6 +491,7 @@ def test_status_rejects_mistyped_observation_and_correction_values(tmp_path: Pat
         ("camera_make", ""),
         ("location", {"latitude": "north", "longitude": 10.0}),
         ("location", {"latitude": 91.0, "longitude": 10.0}),
+        ("location", {"latitude": 10**400, "longitude": 10.0}),
     ]
     for name, value in invalid_observations:
         invalid = {
@@ -499,6 +530,38 @@ def test_status_rejects_mistyped_observation_and_correction_values(tmp_path: Pat
     assert correction_fact["state"] == "invalid"
     assert correction_fact["reasons"][0]["code"] == "CATALOG_FIELD_TYPE"
 
+    huge_confidence = {
+        **base,
+        "runs": {
+            **base["runs"],
+            "vision-1": {
+                "kind": "vision",
+                "provider": "deterministic-fake",
+                "model": "fixture-v1",
+                "prompt_version": "v1",
+                "settings": {},
+                "executed_at": "2026-08-23T10:01:00+08:00",
+                "outcome": "success",
+            },
+        },
+        "inferences": {
+            "description": {
+                "value": "A privacy-safe fixture",
+                "confidence": 10**400,
+                "run_id": "vision-1",
+            }
+        },
+    }
+    catalog.write_text(
+        json.dumps(huge_confidence, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    huge = run_cli("--project", str(workspace), "status", "--json")
+    huge_fact = json.loads(huge.stdout)["layers"]["semantic_catalog"]
+    assert huge_fact["state"] == "invalid"
+    assert huge_fact["reasons"][0]["code"] == "CATALOG_FIELD_VALUE"
+    assert "Traceback" not in huge.stderr
+
 
 def test_status_accepts_supported_observation_and_correction_values(tmp_path: Path) -> None:
     workspace = tmp_path / "supported-values"
@@ -515,6 +578,7 @@ def test_status_accepts_supported_observation_and_correction_values(tmp_path: Pa
             "tool": "privacy-safe-extractor",
             "version": "1",
             "executed_at": "2026-08-23T10:00:00+08:00",
+            "outcome": "success",
         }
     }
     observation_values: dict[str, object] = {
