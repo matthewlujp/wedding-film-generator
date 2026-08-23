@@ -257,6 +257,17 @@ def test_status_rejects_non_strict_jsonl_and_locator_duplicates(tmp_path: Path) 
         assert fact["state"] == "invalid"
         assert fact["reasons"][0]["code"] == expected_code
 
+    oversized_integer = valid.replace('"byte_size":20', f'"byte_size":{"9" * 5000}')
+    catalog.write_text(oversized_integer + "\n", encoding="utf-8")
+
+    oversized = run_cli("--project", str(workspace), "status", "--json")
+
+    oversized_fact = json.loads(oversized.stdout)["layers"]["semantic_catalog"]
+    assert oversized.returncode == 1
+    assert oversized_fact["state"] == "invalid"
+    assert oversized_fact["reasons"][0]["code"] == "CATALOG_JSON_INVALID"
+    assert "Traceback" not in oversized.stderr
+
 
 def test_rescan_can_publish_a_valid_empty_current_state(tmp_path: Path) -> None:
     workspace = tmp_path / "emptied-project"

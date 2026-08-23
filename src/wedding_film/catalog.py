@@ -495,6 +495,12 @@ def _load_catalog(path: Path) -> list[JsonObject]:
             raise _problem(
                 "CATALOG_JSON_INVALID", f"catalog line {line_number} is malformed"
             ) from error
+        except ValueError as error:
+            # CPython raises ValueError here when a JSON integer exceeds its
+            # configured decimal digit conversion limit.
+            raise _problem(
+                "CATALOG_JSON_INVALID", f"catalog line {line_number} is malformed"
+            ) from error
         records.append(_validate_record(loaded))
     return records
 
