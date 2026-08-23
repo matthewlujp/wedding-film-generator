@@ -12,6 +12,7 @@ from typing import Literal, TypedDict, cast
 import yaml
 
 from wedding_film.adapters import required_credentials
+from wedding_film.catalog import CatalogProblem, validate_catalog
 from wedding_film.config import (
     ConfigProblem,
     ProjectConfig,
@@ -242,6 +243,8 @@ def _artifact_preflight(
     phase: str,
     dependencies: dict[str, Fact],
     upstream_hashes: dict[str, str],
+    *,
+    allow_empty: bool = False,
 ) -> Fact | None:
     try:
         if not artifact.exists():
@@ -253,7 +256,11 @@ def _artifact_preflight(
                 phase=phase,
                 upstream_hashes=upstream_hashes,
             )
-        if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size == 0:
+        if (
+            artifact.is_symlink()
+            or not artifact.is_file()
+            or (artifact.stat().st_size == 0 and not allow_empty)
+        ):
             return _fact(
                 "invalid",
                 f"{code_prefix}_INVALID_ARTIFACT",
@@ -306,6 +313,46 @@ def _canonical_fact(
         f"{filename} cannot be ready until its owning validation slice is installed",
         [str(artifact)],
         phase=name,
+        upstream_hashes=hashes,
+    )
+
+
+def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
+    catalog = workspace / "catalog.jsonl"
+    hashes, hash_error = _current_hashes(
+        {"materials": workspace / "materials"}, "SEMANTIC_CATALOG", "semantic_catalog"
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        catalog,
+        "SEMANTIC_CATALOG",
+        "semantic_catalog",
+        {"materials": materials},
+        hashes,
+        allow_empty=True,
+    )
+    if preflight is not None:
+        if preflight["state"] == "missing" and _usable(materials):
+            preflight["next_commands"] = [_command(workspace, "catalog scan")]
+        return preflight
+    try:
+        validate_catalog(catalog, workspace)
+    except CatalogProblem as problem:
+        return _fact(
+            "invalid",
+            problem.code,
+            problem.message,
+            [str(catalog)],
+            phase="semantic_catalog",
+            upstream_hashes=hashes,
+        )
+    return _fact(
+        "ready",
+        "SEMANTIC_CATALOG_VALID",
+        "catalog.jsonl is structurally valid and source-integrity checked",
+        [str(catalog)],
+        phase="semantic_catalog",
         upstream_hashes=hashes,
     )
 
@@ -453,18 +500,12 @@ def derive_status(workspace: Path) -> StatusPayload:
     ffprobe = _executable_fact("ffprobe")
     credentials = _credentials_fact(config)
 
-    materials_path = workspace / "materials"
     catalog_path = workspace / "catalog.jsonl"
     story_path = workspace / "story.md"
     script_path = workspace / "script.md"
     storyboard_path = workspace / "storyboard.yaml"
     materials = _materials_fact(workspace)
-    catalog = _canonical_fact(
-        workspace,
-        "semantic_catalog",
-        "catalog.jsonl",
-        {"materials": (materials_path, materials)},
-    )
+    catalog = _catalog_fact(workspace, materials)
     story = _canonical_fact(
         workspace,
         "story",

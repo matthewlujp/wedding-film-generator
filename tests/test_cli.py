@@ -273,7 +273,7 @@ def test_status_reports_stale_unvalidated_artifacts_and_missing_tools(
     assert payload["prerequisites"]["ffprobe"]["state"] == "missing"
     assert payload["layers"]["semantic_catalog"]["state"] == "invalid"
     assert payload["layers"]["semantic_catalog"]["reasons"][0]["code"] == (
-        "SEMANTIC_CATALOG_VALIDATOR_UNAVAILABLE"
+        "CATALOG_JSON_INVALID"
     )
     assert "semantic_catalog" in payload["layers"]["storyboard"]["upstream_hashes"]
     assert "catalog" not in payload["layers"]["storyboard"]["upstream_hashes"]
@@ -288,12 +288,12 @@ def test_status_never_advertises_commands_missing_from_the_cli(tmp_path: Path) -
 
     status = json.loads(run_cli("--project", str(workspace), "status", "--json").stdout)
 
-    assert status["safe_next_commands"] == []
-    assert all(
-        fact["next_commands"] == []
-        for group in (status["prerequisites"], status["layers"])
-        for fact in group.values()
-    )
+    assert status["safe_next_commands"] == [
+        f"wedding-film --project {workspace} catalog scan"
+    ]
+    assert status["layers"]["semantic_catalog"]["next_commands"] == [
+        f"wedding-film --project {workspace} catalog scan"
+    ]
 
 
 def test_status_json_reports_artifact_io_errors_without_a_traceback(
