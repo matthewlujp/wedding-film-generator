@@ -53,6 +53,9 @@ def _now() -> str:
 
 def _write_event(stream: Any, event: dict[str, object]) -> None:
     stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _sync_stream(stream: Any) -> None:
     stream.flush()
     os.fsync(stream.fileno())
 
@@ -325,6 +328,7 @@ def _append_run(path: Path, events: list[dict[str, object]]) -> None:
         with path.open("a", encoding="utf-8", newline="\n") as stream:
             for event in events:
                 _write_event(stream, event)
+            _sync_stream(stream)
     except OSError as error:
         raise CatalogProblem("VISION_IO_ERROR", "Analysis Run could not be appended") from error
 
@@ -414,6 +418,8 @@ def analyze_asset(workspace: Path, asset_id: str) -> AnalysisResult:
                     "started_at": _now(),
                 },
             )
+            # The command journal must reach stable storage before its final name is visible.
+            _sync_stream(stream)
         os.replace(run_temp, run_path)
         _fsync_directory(run_directory)
         run_temp = None
