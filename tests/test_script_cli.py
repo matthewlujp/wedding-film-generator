@@ -463,3 +463,43 @@ def test_isolated_script_validation_reports_structure_without_valid_story(
         assert payload["diagnostics"] == []
         assert payload["warnings"][0]["code"] == warning_code
         assert payload["document"]["blocks"][0]["type"] == "card"
+
+
+def test_script_rejects_rich_markdown_constructs_spanning_body_lines(tmp_path: Path) -> None:
+    story = valid_story()
+    base = valid_script(story)
+    for name, rich_body in (
+        ("setext-heading", "永遠のはじまり\n-"),
+        ("multiline-emphasis", "_永遠の\nはじまり_"),
+        ("multiline-html", "<div\nclass=message>永遠</div>"),
+    ):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        (workspace / "story.md").write_text(story, encoding="utf-8")
+        (workspace / "script.md").write_text(
+            base.replace("永遠のはじまり", rich_body), encoding="utf-8"
+        )
+
+        result = run_cli("--project", str(workspace), "script", "validate", "--json")
+
+        assert result.returncode == 1, name
+        assert json.loads(result.stdout)["diagnostics"][0]["code"] == (
+            "SCRIPT_BLOCK_BODY_RICH_TEXT"
+        )
+
+
+def test_script_accepts_literal_punctuation_that_is_not_markdown(tmp_path: Path) -> None:
+    workspace = tmp_path / "literal-punctuation"
+    workspace.mkdir()
+    story = valid_story()
+    body = "5 * 7\n名前_with_detail\n星印 * はそのまま"
+    (workspace / "story.md").write_text(story, encoding="utf-8")
+    (workspace / "script.md").write_text(
+        valid_script(story).replace("永遠のはじまり", body), encoding="utf-8"
+    )
+
+    result = run_cli("--project", str(workspace), "script", "validate", "--json")
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0, result.stdout
+    assert payload["document"]["blocks"][1]["body"] == body

@@ -56,15 +56,21 @@ _BLOCK = re.compile(r"^ {0,3}## (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}")
 _METADATA = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*:.*")
-_RICH_LINE = re.compile(
+_RICH_BLOCK_LINE = re.compile(
     r"^(?: {4}| {0,3}(?:#{1,6}\s|>|(?:[-+*]|\d+[.)])\s|`{3,}|~{3,}|"
-    r"(?:[-*_]\s*){3,}$|=+\s*$|\[[^]]+\]:\s))"
+    r"(?:[-*_]\s*){3,}$|\[[^]]+\]:\s))"
 )
-_RICH_INLINE = re.compile(
-    r"`|!\[|\[[^]\n]*\](?:\([^\n]*\)|\[[^]\n]*\])|"
+_SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
+_RICH_SPAN = re.compile(
+    r"(`+)(?=\S)(?:(?!\1).)+?\1|"
+    r"!\[|\[[^]]*\](?:\([^)]*\)|\[[^]]*\])|"
     r"</?[A-Za-z][^>]*>|<[!?]|<(?:https?://|mailto:)[^>]*>|<[^ >]+@[^ >]+>|"
     r"<!--|-->|&(?:#\d+|#x[0-9A-Fa-f]+|\w+);|"
-    r"\\(?:[!\"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|$)|\*|_[^_\n]+_|~~| {2,}$"
+    r"\\(?:[!\"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|$)|"
+    r"\*(?=\S)(?:(?!\n\n).)*?(?<=\S)\*|"
+    r"(?<!\w)_(?=\S)(?:(?!\n\n).)*?(?<=\S)_(?!\w)|"
+    r"~~(?=\S)(?:(?!\n\n).)*?(?<=\S)~~| {2,}(?:\n|$)",
+    re.DOTALL,
 )
 
 
@@ -83,12 +89,14 @@ def _invalid(
 
 
 def _is_plain_unicode(lines: list[str]) -> bool:
-    for line in lines:
-        if _RICH_LINE.match(line) or _RICH_INLINE.search(line):
+    for index, line in enumerate(lines):
+        if _RICH_BLOCK_LINE.match(line):
+            return False
+        if index > 0 and lines[index - 1].strip() and _SETEXT_UNDERLINE.fullmatch(line):
             return False
         if any(unicodedata.category(character) in {"Cc", "Cf"} for character in line):
             return False
-    return True
+    return _RICH_SPAN.search("\n".join(lines)) is None
 
 
 def parse_script(path: Path) -> tuple[ScriptDocument | None, list[Diagnostic]]:
