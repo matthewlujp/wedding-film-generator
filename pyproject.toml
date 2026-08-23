@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local, inspectable wedding-film production pipeline"
 requires-python = ">=3.12"
 dependencies = [
+  "pillow>=11,<13",
   "PyYAML>=6.0.2,<7",
 ]
 

@@ -13,6 +13,7 @@ from typing import NoReturn, TextIO
 import yaml
 
 from wedding_film.catalog import CatalogProblem, scan_catalog
+from wedding_film.exif import extract_exif
 from wedding_film.status import write_status
 from wedding_film.story import write_story_validation
 from wedding_film.workspace import unsafe_destination_reason
@@ -77,12 +78,9 @@ def _emit(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdo
     )
 
 
-def _emit_catalog(
-    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
-) -> None:
+def _emit_catalog(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout) -> None:
     print(
-        f"workspace={workspace} phase=catalog artifact=catalog.jsonl "
-        f"code={code} message={message}",
+        f"workspace={workspace} phase=catalog artifact=catalog.jsonl code={code} message={message}",
         file=stream,
     )
 
@@ -95,6 +93,21 @@ def scan(workspace: Path) -> int:
         return INVALID_OR_PREFLIGHT
     _emit_catalog(workspace, "CATALOG_SCANNED", f"catalog contains {count} Original Assets")
     return SUCCESS
+
+
+def extract(workspace: Path) -> int:
+    try:
+        result = extract_exif(workspace)
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_catalog(
+        workspace,
+        "EXIF_EXTRACTION_COMPLETED",
+        f"EXIF extraction succeeded={result.succeeded} "
+        f"reused={result.reused} failed={result.failed}",
+    )
+    return PARTIAL_OR_BUDGET_STOP if result.failed else SUCCESS
 
 
 def initialize(workspace: Path) -> int:
@@ -149,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     catalog = commands.add_parser("catalog")
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_commands.add_parser("scan")
+    catalog_commands.add_parser("extract")
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     validate = commands.add_parser("validate")
@@ -163,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
             return initialize(arguments.project)
         if arguments.command == "catalog" and arguments.catalog_command == "scan":
             return scan(arguments.project)
+        if arguments.command == "catalog" and arguments.catalog_command == "extract":
+            return extract(arguments.project)
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":
