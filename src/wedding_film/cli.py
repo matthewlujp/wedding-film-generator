@@ -157,10 +157,7 @@ def write_validation(workspace: Path, as_json: bool, strict: bool) -> int:
     story = workspace / "story.md"
     if validate_story(story):
         return write_story_validation(workspace, as_json)
-    script = workspace / "script.md"
-    if script.exists() or script.is_symlink():
-        return write_script_validation(workspace, as_json, strict)
-    return write_story_validation(workspace, as_json)
+    return write_script_validation(workspace, as_json, strict)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,6 +176,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate")
     validate.add_argument("--json", action="store_true", dest="as_json")
     validate.add_argument("--strict", action="store_true")
+    story = commands.add_parser("story")
+    story_commands = story.add_subparsers(dest="story_command", required=True)
+    story_validate = story_commands.add_parser("validate")
+    story_validate.add_argument("--json", action="store_true", dest="as_json")
     script = commands.add_parser("script")
     script_commands = script.add_subparsers(dest="script_command", required=True)
     script_validate = script_commands.add_parser("validate")
@@ -200,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":
             return write_validation(arguments.project, arguments.as_json, arguments.strict)
+        if arguments.command == "story" and arguments.story_command == "validate":
+            return write_story_validation(arguments.project, arguments.as_json)
         if arguments.command == "script" and arguments.script_command == "validate":
             return write_script_validation(arguments.project, arguments.as_json, arguments.strict)
         return INVALID_OR_PREFLIGHT

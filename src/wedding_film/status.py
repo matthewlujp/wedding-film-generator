@@ -436,7 +436,7 @@ def _script_fact(workspace: Path, story_path: Path, story: Fact) -> Fact:
         if preflight["state"] != "missing":
             preflight["next_commands"] = [_command(workspace, "script validate")]
         return preflight
-    diagnostics, validation_warnings = validate_script(artifact, story_path)
+    _, diagnostics, validation_warnings = validate_script(artifact, story_path)
     if diagnostics:
         problem = diagnostics[0]
         return _fact(

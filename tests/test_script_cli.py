@@ -94,6 +94,31 @@ def test_script_validate_accepts_all_block_types_and_japanese_deterministically(
     assert json.loads(first.stdout) == {
         "artifact": str(script),
         "diagnostics": [],
+        "document": {
+            "blocks": [
+                {
+                    "block_id": "opening-card",
+                    "body": "ふたりの物語\nここから始まる",
+                    "story_moment": "preparation",
+                    "type": "card",
+                },
+                {
+                    "block_id": "ceremony-caption",
+                    "body": "永遠のはじまり",
+                    "story_moment": "ceremony",
+                    "type": "caption",
+                },
+                {
+                    "block_id": "ceremony-narration",
+                    "body": "家族と友人に見守られ、\nふたりは誓いを交わします。",
+                    "story_moment": "ceremony",
+                    "type": "narration",
+                },
+            ],
+            "inputs": {"story": f"sha256:{story_hash(story)}"},
+            "schema_version": 1,
+            "title": "私たちの Wedding",
+        },
         "state": "ready",
         "warnings": [],
     }
@@ -308,10 +333,22 @@ def test_script_text_edits_preserve_authored_line_breaks_and_stable_identity(
     before = script_path.read_bytes()
 
     result = run_cli("--project", str(workspace), "script", "validate", "--json")
+    payload = json.loads(result.stdout)
 
     assert result.returncode == 0, result.stdout
     assert script_path.read_bytes() == before
     assert "\n心をこめて、\n".encode() in before
+    assert [block["block_id"] for block in payload["document"]["blocks"]] == [
+        "opening-card",
+        "ceremony-caption",
+        "ceremony-narration",
+    ]
+    assert payload["document"]["blocks"][2] == {
+        "block_id": "ceremony-narration",
+        "body": "静かに、\n心をこめて、\n誓いを交わします。",
+        "story_moment": "ceremony",
+        "type": "narration",
+    }
 
 
 def test_script_validation_reports_stable_human_diagnostics(tmp_path: Path) -> None:
@@ -386,3 +423,43 @@ def test_top_level_validate_checks_present_script_and_supports_strict_mode(
     strict = run_cli("--project", str(workspace), "validate", "--strict", "--json")
     assert strict.returncode == 1
     assert json.loads(strict.stdout)["diagnostics"][0]["code"] == "SCRIPT_STORY_HASH_STALE"
+
+
+def test_top_level_validate_requires_script_after_valid_story(tmp_path: Path) -> None:
+    workspace = tmp_path / "missing-script"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(valid_story(), encoding="utf-8")
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["diagnostics"][0] == {
+        "artifact": str(workspace / "script.md"),
+        "code": "SCRIPT_MISSING",
+        "location": "$",
+        "message": "script.md is absent",
+    }
+
+
+def test_isolated_script_validation_reports_structure_without_valid_story(
+    tmp_path: Path,
+) -> None:
+    story = valid_story()
+    for name, story_contents, warning_code in (
+        ("missing-story", None, "SCRIPT_STORY_MISSING"),
+        ("malformed-story", "# malformed\n", "SCRIPT_STORY_INVALID"),
+    ):
+        workspace = tmp_path / name
+        workspace.mkdir()
+        if story_contents is not None:
+            (workspace / "story.md").write_text(story_contents, encoding="utf-8")
+        (workspace / "script.md").write_text(valid_script(story), encoding="utf-8")
+
+        result = run_cli("--project", str(workspace), "script", "validate", "--json")
+        payload = json.loads(result.stdout)
+
+        assert result.returncode == 0
+        assert payload["state"] == "complete-with-warnings"
+        assert payload["diagnostics"] == []
+        assert payload["warnings"][0]["code"] == warning_code
+        assert payload["document"]["blocks"][0]["type"] == "card"
