@@ -138,7 +138,7 @@ def test_validate_counts_link_labels_but_not_link_metadata_as_visible_prose(
     (visible_workspace / "story.md").write_text(
         valid_story().replace(
             "二人の歩みと **家族への感謝** を伝える。",
-            "[家族の物語](https://example.com/story)",
+            "[家族の物語](https://example.com/a_(b))",
         ),
         encoding="utf-8",
     )
@@ -149,7 +149,9 @@ def test_validate_counts_link_labels_but_not_link_metadata_as_visible_prose(
 
     cases = {
         "empty-inline-link": "[](https://example.com/story)",
+        "balanced-inline-link": "[](https://example.com/a_(b))",
         "reference-definition": '[story]: https://example.com/story "editor note"',
+        "multiline-reference-definition": "[story]: /url '\n title\n'",
     }
     for name, prose in cases.items():
         workspace = tmp_path / name

@@ -32,16 +32,17 @@ _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _HTML_TAG = re.compile(
     r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*?)?\s*/?>|<![A-Z][^<>]*>|<\?[^<>]*\?>"
 )
-_INLINE_LINK = re.compile(
-    r"!?\[([^]\n]*)\]\(\s*(?:<[^>\n]*>|[^()\s]+)"
-    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
-)
 _REFERENCE_LINK = re.compile(r"!?\[([^]\n]*)\]\[[^]\n]*\]")
 _REFERENCE_DEFINITION = re.compile(
     r"^ {0,3}\[[^]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)"
-    r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$",
+    r"(?:[ \t]*(?:\n[ \t]{0,3})?(?:"
+    r'\"[^\"\n]*(?:\n[ \t]*[^\"\n]*){0,32}\"|'
+    r"'[^'\n]*(?:\n[ \t]*[^'\n]*){0,32}'|"
+    r"\([^()\n]*(?:\n[ \t]*[^()\n]*){0,32}\)"
+    r"))?[ \t]*(?:\n|$)",
     re.MULTILINE,
 )
+_MAX_LINK_PARENTHESES = 32
 _DEFAULT_IGNORABLE_RANGES = (
     (0x034F, 0x034F),
     (0x115F, 0x1160),
@@ -108,6 +109,85 @@ def _is_default_ignorable(character: str) -> bool:
     )
 
 
+def _inline_link_end(text: str, opening_parenthesis: int) -> int | None:
+    cursor = opening_parenthesis + 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor < len(text) and text[cursor] == "<":
+        cursor += 1
+        while cursor < len(text) and text[cursor] not in ">\n":
+            cursor += 2 if text[cursor] == "\\" and cursor + 1 < len(text) else 1
+        if cursor >= len(text) or text[cursor] != ">":
+            return None
+        cursor += 1
+    else:
+        depth = 0
+        while cursor < len(text):
+            character = text[cursor]
+            if character == "\\" and cursor + 1 < len(text):
+                cursor += 2
+                continue
+            if character.isspace() and depth == 0:
+                break
+            if character == "(":
+                depth += 1
+                if depth > _MAX_LINK_PARENTHESES:
+                    return None
+            elif character == ")":
+                if depth == 0:
+                    return cursor + 1
+                depth -= 1
+            cursor += 1
+        if depth != 0:
+            return None
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor < len(text) and text[cursor] == ")":
+        return cursor + 1
+    if cursor >= len(text) or text[cursor] not in "\"'(":
+        return None
+    delimiter = text[cursor]
+    closing = ")" if delimiter == "(" else delimiter
+    cursor += 1
+    while cursor < len(text) and text[cursor] != closing:
+        cursor += 2 if text[cursor] == "\\" and cursor + 1 < len(text) else 1
+    if cursor >= len(text):
+        return None
+    cursor += 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return cursor + 1 if cursor < len(text) and text[cursor] == ")" else None
+
+
+def _replace_inline_links(text: str) -> str:
+    rendered: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        label_start = text.find("[", cursor)
+        if label_start == -1:
+            rendered.append(text[cursor:])
+            break
+        label_end = text.find("]", label_start + 1)
+        if label_end == -1 or label_end + 1 >= len(text) or text[label_end + 1] != "(":
+            rendered.append(text[cursor : label_start + 1])
+            cursor = label_start + 1
+            continue
+        link_end = _inline_link_end(text, label_end + 1)
+        if link_end is None:
+            rendered.append(text[cursor : label_start + 1])
+            cursor = label_start + 1
+            continue
+        prefix_start = (
+            label_start - 1
+            if label_start > cursor and text[label_start - 1] == "!"
+            else label_start
+        )
+        rendered.append(text[cursor:prefix_start])
+        rendered.append(text[label_start + 1 : label_end])
+        cursor = link_end
+    return "".join(rendered)
+
+
 def _scan_markdown(lines: list[str]) -> tuple[list[tuple[int, str]], list[str]]:
     structure: list[tuple[int, str]] = []
     content: list[str] = []
@@ -154,7 +234,7 @@ def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
 def _has_visible_prose(lines: list[str]) -> bool:
     _, content = _scan_markdown(lines)
     visible = _REFERENCE_DEFINITION.sub("", "\n".join(content))
-    visible = _INLINE_LINK.sub(lambda match: match.group(1), visible)
+    visible = _replace_inline_links(visible)
     visible = _REFERENCE_LINK.sub(lambda match: match.group(1), visible)
     visible = html.unescape(_HTML_TAG.sub("", visible))
     visible = re.sub(r"[\s*_~`#>\[\](){}.!:+\\|=-]", "", visible)
