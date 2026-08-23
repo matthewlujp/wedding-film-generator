@@ -17,6 +17,7 @@ from wedding_film.exif import extract_exif
 from wedding_film.script import write_script_validation
 from wedding_film.status import write_status
 from wedding_film.story import validate_story, write_story_validation
+from wedding_film.vision import analyze_asset
 from wedding_film.workspace import unsafe_destination_reason
 
 SUCCESS = 0
@@ -111,6 +112,21 @@ def extract(workspace: Path) -> int:
     return PARTIAL_OR_BUDGET_STOP if result.failed else SUCCESS
 
 
+def analyze(workspace: Path, asset_id: str) -> int:
+    try:
+        result = analyze_asset(workspace, asset_id)
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_catalog(
+        workspace,
+        "VISION_ANALYSIS_COMPLETED",
+        f"vision analysis succeeded={result.succeeded} "
+        f"reused={result.reused} failed={result.failed}",
+    )
+    return SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -171,6 +187,8 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_commands = catalog.add_subparsers(dest="catalog_command", required=True)
     catalog_commands.add_parser("scan")
     catalog_commands.add_parser("extract")
+    analyze_parser = catalog_commands.add_parser("analyze")
+    analyze_parser.add_argument("--asset-id", required=True)
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     validate = commands.add_parser("validate")
@@ -197,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
             return scan(arguments.project)
         if arguments.command == "catalog" and arguments.catalog_command == "extract":
             return extract(arguments.project)
+        if arguments.command == "catalog" and arguments.catalog_command == "analyze":
+            return analyze(arguments.project, arguments.asset_id)
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":

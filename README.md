@@ -12,6 +12,7 @@ uv run wedding-film --project projects/example project init
 mkdir -p projects/example/materials
 uv run wedding-film --project projects/example catalog scan
 uv run wedding-film --project projects/example catalog extract
+uv run wedding-film --project projects/example catalog analyze --asset-id sha256:<digest>
 uv run wedding-film --project projects/example status
 uv run wedding-film --project projects/example status --json
 ```
@@ -24,6 +25,12 @@ Initialization accepts a nonexistent destination or an existing empty directory.
 dimension, orientation, capture-time, camera, and GPS Observations. Malformed embedded tags
 become warnings in append-only `runs/analysis/*.jsonl`; decode failures return exit code 2 after
 preserving successful asset checkpoints. Identical successful extraction contracts are reused.
+
+`catalog analyze --asset-id` analyzes exactly one cataloged image through the configured Vision
+Adapter. The offline `fake` adapter is deterministic. Only a metadata-free, oriented, sRGB JPEG
+Analysis Input crosses the adapter boundary; the temporary derivative is deleted afterward. A
+complete candidate atomically replaces the adapter-owned Inferences, while invalid or refused
+candidates leave the Semantic Catalog unchanged. Identical successful contracts are reused.
 
 Real Project Workspaces under `projects/` are ignored by Git. Keep private workspaces outside the repository or under that ignored directory.
 
