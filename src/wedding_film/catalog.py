@@ -666,6 +666,42 @@ def _serialize(records: list[JsonObject]) -> str:
     )
 
 
+def load_catalog(workspace: Path) -> list[JsonObject]:
+    """Load a valid current catalog after checking its Original Assets."""
+    try:
+        load_project_config(workspace)
+    except ConfigProblem as problem:
+        raise _problem(problem.code, problem.message) from problem
+    return validate_catalog(workspace / "catalog.jsonl", workspace)
+
+
+def checkpoint_catalog(workspace: Path, records: list[JsonObject]) -> None:
+    """Validate and atomically publish one complete catalog checkpoint."""
+    normalized = [_validate_record(record) for record in records]
+    _validate_whole_catalog(normalized)
+    catalog = workspace / "catalog.jsonl"
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{catalog.name}.", suffix=".candidate", dir=catalog.parent
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as candidate:
+            candidate.write(_serialize(normalized))
+            candidate.flush()
+            os.fsync(candidate.fileno())
+        validate_catalog(temporary, workspace)
+        os.replace(temporary, catalog)
+    except CatalogProblem:
+        raise
+    except OSError as error:
+        raise _problem("CATALOG_IO_ERROR", "catalog could not be atomically replaced") from error
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+
 def scan_catalog(workspace: Path) -> int:
     try:
         load_project_config(workspace)
