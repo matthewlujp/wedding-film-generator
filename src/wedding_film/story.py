@@ -29,9 +29,18 @@ _SECTION = re.compile(r"^ {0,3}## (.+)$")
 _MOMENT = re.compile(r"^ {0,3}### (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_HTML_COMMENT = re.compile(r"<!--(?:.*?-->|.*\Z)", re.DOTALL)
 _HTML_TAG = re.compile(
     r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*?)?\s*/?>|<![A-Z][^<>]*>|<\?[^<>]*\?>"
+)
+_INLINE_LINK = re.compile(
+    r"!?\[([^]\n]*)\]\(\s*(?:<[^>\n]*>|[^()\s]+)"
+    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
+)
+_REFERENCE_LINK = re.compile(r"!?\[([^]\n]*)\]\[[^]\n]*\]")
+_REFERENCE_DEFINITION = re.compile(
+    r"^ {0,3}\[[^]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)"
+    r"(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*$",
+    re.MULTILINE,
 )
 _DEFAULT_IGNORABLE_RANGES = (
     (0x034F, 0x034F),
@@ -71,11 +80,25 @@ def _strict_mapping(loader: StrictLoader, node: MappingNode) -> dict[object, obj
 StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_mapping)
 
 
-def _mask_html_comments(text: str) -> str:
-    return _HTML_COMMENT.sub(
-        lambda match: "".join("\n" if character == "\n" else " " for character in match.group()),
-        text,
-    )
+def _mask_html_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    masked = list(line)
+    cursor = 0
+    while cursor < len(line):
+        if in_comment:
+            end = line.find("-->", cursor)
+            stop = len(line) if end == -1 else end + 3
+            masked[cursor:stop] = " " * (stop - cursor)
+            if end == -1:
+                return "".join(masked), True
+            in_comment = False
+            cursor = stop
+            continue
+        start = line.find("<!--", cursor)
+        if start == -1:
+            break
+        in_comment = True
+        cursor = start
+    return "".join(masked), in_comment
 
 
 def _is_default_ignorable(character: str) -> bool:
@@ -85,44 +108,13 @@ def _is_default_ignorable(character: str) -> bool:
     )
 
 
-def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
-    """Return lines that can define structure, excluding fenced code blocks."""
-    visible: list[tuple[int, str]] = []
-    fence_character: str | None = None
-    fence_length = 0
-    uncommented = _mask_html_comments("\n".join(lines[start:])).split("\n")
-    for index, line in enumerate(uncommented, start=start):
-        if fence_character is not None:
-            stripped = line.lstrip(" ")
-            indentation = len(line) - len(stripped)
-            closing = stripped.rstrip(" ")
-            if (
-                indentation <= 3
-                and closing
-                and set(closing) == {fence_character}
-                and len(closing) >= fence_length
-            ):
-                fence_character = None
-                fence_length = 0
-            continue
-        match = _FENCE_OPEN.fullmatch(line)
-        if match is not None:
-            marker, info = match.groups()
-            # Backtick info strings cannot themselves contain a backtick.
-            if marker[0] == "~" or "`" not in info:
-                fence_character = marker[0]
-                fence_length = len(marker)
-                continue
-        visible.append((index, line))
-    return visible
-
-
-def _has_visible_prose(lines: list[str]) -> bool:
-    without_comments = _mask_html_comments("\n".join(lines)).splitlines()
-    fence_character: str | None = None
-    fence_length = 0
+def _scan_markdown(lines: list[str]) -> tuple[list[tuple[int, str]], list[str]]:
+    structure: list[tuple[int, str]] = []
     content: list[str] = []
-    for line in without_comments:
+    fence_character: str | None = None
+    fence_length = 0
+    in_comment = False
+    for index, line in enumerate(lines):
         if fence_character is not None:
             stripped = line.lstrip(" ")
             indentation = len(line) - len(stripped)
@@ -138,15 +130,33 @@ def _has_visible_prose(lines: list[str]) -> bool:
             else:
                 content.append(line)
             continue
-        match = _FENCE_OPEN.fullmatch(line)
-        if match is not None:
-            marker, info = match.groups()
-            if marker[0] == "~" or "`" not in info:
-                fence_character = marker[0]
-                fence_length = len(marker)
-                continue
-        content.append(line)
-    visible = html.unescape(_HTML_TAG.sub("", "\n".join(content)))
+        if not in_comment:
+            match = _FENCE_OPEN.fullmatch(line)
+            if match is not None:
+                marker, info = match.groups()
+                # Backtick info strings cannot themselves contain a backtick.
+                if marker[0] == "~" or "`" not in info:
+                    fence_character = marker[0]
+                    fence_length = len(marker)
+                    continue
+        uncommented, in_comment = _mask_html_comments(line, in_comment)
+        structure.append((index, uncommented))
+        content.append(uncommented)
+    return structure, content
+
+
+def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
+    """Return lines that can define structure, excluding fenced code blocks."""
+    structure, _ = _scan_markdown(lines[start:])
+    return [(index + start, line) for index, line in structure]
+
+
+def _has_visible_prose(lines: list[str]) -> bool:
+    _, content = _scan_markdown(lines)
+    visible = _REFERENCE_DEFINITION.sub("", "\n".join(content))
+    visible = _INLINE_LINK.sub(lambda match: match.group(1), visible)
+    visible = _REFERENCE_LINK.sub(lambda match: match.group(1), visible)
+    visible = html.unescape(_HTML_TAG.sub("", visible))
     visible = re.sub(r"[\s*_~`#>\[\](){}.!:+\\|=-]", "", visible)
     return any(not _is_default_ignorable(character) for character in visible)
 

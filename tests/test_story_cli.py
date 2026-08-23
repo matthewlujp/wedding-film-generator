@@ -74,6 +74,24 @@ def test_validate_treats_headings_in_fenced_code_as_ordinary_markdown(tmp_path: 
     assert result.returncode == 0, result.stdout
 
 
+def test_validate_keeps_html_comment_openers_literal_inside_fenced_code(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "literal-comment-in-fence"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(
+        valid_story().replace(
+            "二人の歩みと **家族への感謝** を伝える。",
+            "```text\n<!-- literal and intentionally unterminated\n```",
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 0, result.stdout
+
+
 def test_validate_ignores_headings_inside_closed_and_unterminated_html_comments(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +128,43 @@ def test_validate_counts_markdown_autolinks_as_visible_prose(tmp_path: Path) -> 
     result = run_cli("--project", str(workspace), "validate", "--json")
 
     assert result.returncode == 0, result.stdout
+
+
+def test_validate_counts_link_labels_but_not_link_metadata_as_visible_prose(
+    tmp_path: Path,
+) -> None:
+    visible_workspace = tmp_path / "visible-link-label"
+    visible_workspace.mkdir()
+    (visible_workspace / "story.md").write_text(
+        valid_story().replace(
+            "二人の歩みと **家族への感謝** を伝える。",
+            "[家族の物語](https://example.com/story)",
+        ),
+        encoding="utf-8",
+    )
+
+    visible = run_cli("--project", str(visible_workspace), "validate", "--json")
+
+    assert visible.returncode == 0, visible.stdout
+
+    cases = {
+        "empty-inline-link": "[](https://example.com/story)",
+        "reference-definition": '[story]: https://example.com/story "editor note"',
+    }
+    for name, prose in cases.items():
+        workspace = tmp_path / name
+        workspace.mkdir()
+        (workspace / "story.md").write_text(
+            valid_story().replace("二人の歩みと **家族への感謝** を伝える。", prose),
+            encoding="utf-8",
+        )
+
+        result = run_cli("--project", str(workspace), "validate", "--json")
+
+        assert result.returncode == 1
+        diagnostic = json.loads(result.stdout)["diagnostics"][0]
+        assert diagnostic["code"] == "STORY_SECTION_EMPTY"
+        assert diagnostic["location"] == "sections.intent"
 
 
 def test_validate_accepts_markdown_headings_indented_by_up_to_three_spaces(
