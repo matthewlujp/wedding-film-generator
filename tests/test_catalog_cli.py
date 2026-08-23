@@ -194,7 +194,8 @@ def test_status_rejects_structural_provenance_and_integrity_catalog_failures(
     source.write_bytes(b"changed-after-catalog")
     integrity = run_cli("--project", str(workspace), "status", "--json")
     fact = json.loads(integrity.stdout)["layers"]["semantic_catalog"]
-    assert fact["reasons"][0]["code"] == "CATALOG_SOURCE_INTEGRITY"
+    assert fact["state"] == "stale"
+    assert fact["reasons"][0]["code"] == "CATALOG_SCAN_REQUIRED"
 
 
 def test_status_rejects_duplicate_records_and_scan_preserves_invalid_prior(
@@ -294,3 +295,270 @@ def test_scan_requires_a_valid_initialized_project_and_materials(tmp_path: Path)
     assert no_materials.returncode == 1
     assert "MATERIALS_MISSING" in no_materials.stderr
     assert not (initialized / "catalog.jsonl").exists()
+
+
+def test_status_requires_rescan_for_every_complete_materials_manifest_change(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "freshness-project"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    original = materials / "original.jpg"
+    original.write_bytes(b"privacy-safe-photo-a")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    initial = json.loads(run_cli("--project", str(workspace), "status", "--json").stdout)
+    initial_hash = initial["layers"]["semantic_catalog"]["upstream_hashes"]["materials"]
+
+    duplicate = materials / "duplicate.jpg"
+    duplicate.write_bytes(b"privacy-safe-photo-a")
+    added_duplicate = run_cli("--project", str(workspace), "status", "--json")
+    duplicate_fact = json.loads(added_duplicate.stdout)["layers"]["semantic_catalog"]
+    assert duplicate_fact["state"] == "stale"
+    assert duplicate_fact["reasons"][0]["code"] == "CATALOG_SCAN_REQUIRED"
+    assert duplicate_fact["next_commands"] == [
+        f"wedding-film --project {workspace} catalog scan"
+    ]
+    assert duplicate_fact["upstream_hashes"]["materials"] != initial_hash
+
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    added = materials / "added.jpg"
+    added.write_bytes(b"added-content")
+    added_fact = json.loads(
+        run_cli("--project", str(workspace), "status", "--json").stdout
+    )["layers"]["semantic_catalog"]
+    assert added_fact["state"] == "stale"
+
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    nested = materials / "nested"
+    nested.mkdir()
+    added.rename(nested / "moved.jpg")
+    moved_fact = json.loads(
+        run_cli("--project", str(workspace), "status", "--json").stdout
+    )["layers"]["semantic_catalog"]
+    assert moved_fact["state"] == "stale"
+
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    original.write_bytes(b"changed-content")
+    changed_fact = json.loads(
+        run_cli("--project", str(workspace), "status", "--json").stdout
+    )["layers"]["semantic_catalog"]
+    assert changed_fact["state"] == "stale"
+
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    duplicate.unlink()
+    removed_fact = json.loads(
+        run_cli("--project", str(workspace), "status", "--json").stdout
+    )["layers"]["semantic_catalog"]
+    assert removed_fact["state"] == "stale"
+
+
+def test_rescan_preserves_append_ordered_corrections(tmp_path: Path) -> None:
+    workspace = tmp_path / "correction-order"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    (materials / "asset.jpg").write_bytes(b"privacy-safe-photo-a")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = workspace / "catalog.jsonl"
+    record = json.loads(catalog.read_text(encoding="utf-8"))
+    authored = [
+        {
+            "target": "/inferences/mood",
+            "op": "set",
+            "value": ["joyful"],
+            "at": "2026-08-23T11:00:00+08:00",
+            "actor": "editor",
+        },
+        {
+            "target": "/inferences/mood",
+            "op": "set",
+            "value": ["calm"],
+            "at": "2026-08-23T10:00:00+08:00",
+            "actor": "editor",
+        },
+    ]
+    record["corrections"] = authored
+    catalog.write_text(json.dumps(record, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    result = run_cli("--project", str(workspace), "catalog", "scan")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(catalog.read_text(encoding="utf-8"))["corrections"] == authored
+
+
+def test_status_requires_complete_successful_claim_provenance(tmp_path: Path) -> None:
+    workspace = tmp_path / "provenance-project"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    (materials / "asset.jpg").write_bytes(b"privacy-safe-photo-a")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = workspace / "catalog.jsonl"
+    base = json.loads(catalog.read_text(encoding="utf-8"))
+    base["observations"] = {
+        "media_type": {"value": "image/jpeg", "run_id": "extract-1"}
+    }
+
+    incomplete = {**base, "runs": {"extract-1": {}}}
+    catalog.write_text(
+        json.dumps(incomplete, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    invalid = run_cli("--project", str(workspace), "status", "--json")
+    invalid_fact = json.loads(invalid.stdout)["layers"]["semantic_catalog"]
+    assert invalid_fact["state"] == "invalid"
+    assert invalid_fact["reasons"][0]["code"] == "CATALOG_PROVENANCE_INVALID"
+
+    base["runs"] = {
+        "extract-1": {
+            "kind": "extraction",
+            "tool": "privacy-safe-extractor",
+            "version": "1",
+            "executed_at": "2026-08-23T10:00:00+08:00",
+        },
+        "vision-1": {
+            "kind": "vision",
+            "provider": "deterministic-fake",
+            "model": "fixture-v1",
+            "prompt_version": "v1",
+            "settings": {},
+            "executed_at": "2026-08-23T10:01:00+08:00",
+        },
+    }
+    base["inferences"] = {
+        "description": {
+            "value": "Two people outdoors",
+            "confidence": 0.75,
+            "run_id": "vision-1",
+        }
+    }
+    catalog.write_text(json.dumps(base, separators=(",", ":")) + "\n", encoding="utf-8")
+    valid = run_cli("--project", str(workspace), "status", "--json")
+    assert json.loads(valid.stdout)["layers"]["semantic_catalog"]["state"] == "ready"
+
+
+def test_status_rejects_mistyped_observation_and_correction_values(tmp_path: Path) -> None:
+    workspace = tmp_path / "typed-values"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    (materials / "asset.jpg").write_bytes(b"privacy-safe-photo-a")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = workspace / "catalog.jsonl"
+    base = json.loads(catalog.read_text(encoding="utf-8"))
+    base["runs"] = {
+        "extract-1": {
+            "kind": "extraction",
+            "tool": "privacy-safe-extractor",
+            "version": "1",
+            "executed_at": "2026-08-23T10:00:00+08:00",
+        }
+    }
+    invalid_observations: list[tuple[str, object]] = [
+        ("media_type", 42),
+        ("format", []),
+        ("capture_time", "not-a-timestamp"),
+        ("camera_make", ""),
+        ("location", {"latitude": "north", "longitude": 10.0}),
+        ("location", {"latitude": 91.0, "longitude": 10.0}),
+    ]
+    for name, value in invalid_observations:
+        invalid = {
+            **base,
+            "observations": {name: {"value": value, "run_id": "extract-1"}},
+        }
+        catalog.write_text(
+            json.dumps(invalid, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        result = run_cli("--project", str(workspace), "status", "--json")
+        fact = json.loads(result.stdout)["layers"]["semantic_catalog"]
+        assert fact["state"] == "invalid"
+        assert fact["reasons"][0]["code"] in {
+            "CATALOG_FIELD_TYPE",
+            "CATALOG_FIELD_VALUE",
+        }
+
+    invalid_correction = {
+        **base,
+        "corrections": [
+            {
+                "target": "/observations/orientation",
+                "op": "set",
+                "value": "upright",
+                "at": "2026-08-23T10:00:00+08:00",
+                "actor": "editor",
+            }
+        ],
+    }
+    catalog.write_text(
+        json.dumps(invalid_correction, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    correction = run_cli("--project", str(workspace), "status", "--json")
+    correction_fact = json.loads(correction.stdout)["layers"]["semantic_catalog"]
+    assert correction_fact["state"] == "invalid"
+    assert correction_fact["reasons"][0]["code"] == "CATALOG_FIELD_TYPE"
+
+
+def test_status_accepts_supported_observation_and_correction_values(tmp_path: Path) -> None:
+    workspace = tmp_path / "supported-values"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    (materials / "asset.jpg").write_bytes(b"privacy-safe-photo-a")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = workspace / "catalog.jsonl"
+    record = json.loads(catalog.read_text(encoding="utf-8"))
+    record["runs"] = {
+        "extract-1": {
+            "kind": "extraction",
+            "tool": "privacy-safe-extractor",
+            "version": "1",
+            "executed_at": "2026-08-23T10:00:00+08:00",
+        }
+    }
+    observation_values: dict[str, object] = {
+        "media_type": "image/jpeg",
+        "format": "JPEG",
+        "pixel_width": 1920,
+        "pixel_height": 1080,
+        "orientation": 1,
+        "capture_time": "2026-08-23T10:00:00+08:00",
+        "camera_make": "Privacy Safe Camera",
+        "camera_model": "Fixture 1",
+        "location": {"latitude": 1.3521, "longitude": 103.8198, "altitude": 15.0},
+    }
+    record["observations"] = {
+        name: {"value": value, "run_id": "extract-1"}
+        for name, value in observation_values.items()
+    }
+    record["corrections"] = [
+        {
+            "target": "/observations/location",
+            "op": "set",
+            "value": {"latitude": 1.3, "longitude": 103.8},
+            "at": "2026-08-23T11:00:00+08:00",
+            "actor": "editor",
+        },
+        {
+            "target": "/inferences/shot_type",
+            "op": "set",
+            "value": "wide",
+            "at": "2026-08-23T11:01:00+08:00",
+            "actor": "editor",
+        },
+        {
+            "target": "/subject_attributions",
+            "op": "set",
+            "value": ["principal-one", "principal-two"],
+            "at": "2026-08-23T11:02:00+08:00",
+            "actor": "editor",
+        },
+    ]
+    catalog.write_text(
+        json.dumps(record, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+
+    status = run_cli("--project", str(workspace), "status", "--json")
+
+    assert json.loads(status.stdout)["layers"]["semantic_catalog"]["state"] == "ready"

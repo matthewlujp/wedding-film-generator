@@ -9,15 +9,18 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from wedding_film.config import ConfigProblem, load_project_config
 
 SCHEMA_VERSION = 1
 ASSET_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+PARTICIPANT_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+MEDIA_TYPE_PATTERN = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*\Z")
 RFC3339_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
@@ -76,6 +79,13 @@ RUN_KEYS = (
 )
 
 JsonObject = dict[str, Any]
+ScannedAssets = dict[str, tuple[int, list[str]]]
+
+
+@dataclass(frozen=True)
+class MaterialsManifest:
+    assets: ScannedAssets
+    digest: str
 
 
 class CatalogProblem(Exception):
@@ -164,10 +174,18 @@ def _validate_locator(value: object) -> str:
     return locator
 
 
-def _validate_run_reference(value: object, runs: Mapping[str, object]) -> str:
+def _validate_run_reference(
+    value: object, runs: Mapping[str, object], expected_kind: str
+) -> str:
     run_id = _string(value)
     if run_id not in runs:
         raise _problem("CATALOG_PROVENANCE_DANGLING", "catalog claim references an absent run")
+    run = _object(runs[run_id])
+    if run.get("kind") != expected_kind:
+        raise _problem(
+            "CATALOG_PROVENANCE_INVALID",
+            "catalog claim references the wrong kind of successful run",
+        )
     return run_id
 
 
@@ -181,6 +199,31 @@ def _validate_runs(value: object) -> JsonObject:
         unknown = set(run) - set(RUN_KEYS)
         if unknown:
             raise _problem("CATALOG_UNKNOWN_FIELD", "catalog run contains an unknown field")
+        kind = run.get("kind")
+        if kind == "extraction":
+            required = {"kind", "version", "executed_at"}
+            if required - set(run) or not ({"tool", "adapter"} & set(run)):
+                raise _problem(
+                    "CATALOG_PROVENANCE_INVALID",
+                    "extraction provenance is incomplete",
+                )
+        elif kind == "vision":
+            required = {
+                "kind",
+                "provider",
+                "model",
+                "prompt_version",
+                "settings",
+                "executed_at",
+            }
+            if required - set(run):
+                raise _problem(
+                    "CATALOG_PROVENANCE_INVALID", "vision provenance is incomplete"
+                )
+        else:
+            raise _problem(
+                "CATALOG_PROVENANCE_INVALID", "catalog run kind is unsupported"
+            )
         for key, item in run.items():
             if key == "settings":
                 _object(item)
@@ -192,6 +235,101 @@ def _validate_runs(value: object) -> JsonObject:
             key: _canonical_value(run[key]) for key in RUN_KEYS if key in run
         }
     return normalized
+
+
+def _number(value: object) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise _problem("CATALOG_FIELD_TYPE", "catalog field must be a finite number")
+    if not math.isfinite(value):
+        raise _problem("CATALOG_FIELD_TYPE", "catalog field must be a finite number")
+    return float(value)
+
+
+def _string_set(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise _problem("CATALOG_FIELD_TYPE", "catalog field must be an array of strings")
+    strings = [_string(item) for item in value]
+    if strings != sorted(set(strings)):
+        raise _problem("CATALOG_FIELD_VALUE", "catalog string array must be sorted and unique")
+    return strings
+
+
+def _validate_observation_value(name: str, value: object) -> Any:
+    if name == "media_type":
+        media_type = _string(value)
+        if not MEDIA_TYPE_PATTERN.fullmatch(media_type):
+            raise _problem("CATALOG_FIELD_VALUE", "media_type must be a lowercase media type")
+        return media_type
+    if name in {"format", "camera_make", "camera_model"}:
+        return _string(value)
+    if name in {"pixel_width", "pixel_height"}:
+        if not _is_int(value):
+            raise _problem("CATALOG_FIELD_TYPE", "pixel dimensions must be integers")
+        integer = cast(int, value)
+        if integer <= 0:
+            raise _problem("CATALOG_FIELD_VALUE", "pixel dimensions must be positive")
+        return integer
+    if name == "orientation":
+        if not _is_int(value):
+            raise _problem("CATALOG_FIELD_TYPE", "orientation must be an integer")
+        integer = cast(int, value)
+        if not 1 <= integer <= 8:
+            raise _problem("CATALOG_FIELD_VALUE", "orientation must be from 1 through 8")
+        return integer
+    if name == "capture_time":
+        return _validate_rfc3339(value)
+    if name == "location":
+        location = _object(value)
+        required = {"latitude", "longitude"}
+        allowed = required | {"altitude"}
+        if required - set(location):
+            raise _problem("CATALOG_MISSING_FIELD", "location is missing coordinates")
+        if set(location) - allowed:
+            raise _problem("CATALOG_UNKNOWN_FIELD", "location contains an unknown field")
+        latitude = _number(location["latitude"])
+        longitude = _number(location["longitude"])
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise _problem("CATALOG_FIELD_VALUE", "location coordinates are out of range")
+        normalized: JsonObject = {"latitude": latitude, "longitude": longitude}
+        if "altitude" in location:
+            normalized["altitude"] = _number(location["altitude"])
+        return normalized
+    raise _problem("CATALOG_UNKNOWN_FIELD", "Observation field is unsupported")
+
+
+def _validate_inference_value(name: str, value: object) -> Any:
+    if name in {"description", "setting"}:
+        return _string(value)
+    if name == "wedding_moment":
+        moment = _string(value)
+        if moment not in {"preparation", "ceremony", "portraits", "reception", "other"}:
+            raise _problem("CATALOG_FIELD_VALUE", "wedding_moment is unsupported")
+        return moment
+    if name in {"subject_roles", "mood", "quality_flags"}:
+        return _string_set(value)
+    if name == "shot_type":
+        shot_type = _string(value)
+        if shot_type not in {"wide", "medium", "close-up", "detail"}:
+            raise _problem("CATALOG_FIELD_VALUE", "shot_type is unsupported")
+        return shot_type
+    raise _problem("CATALOG_UNKNOWN_FIELD", "Inference field is unsupported")
+
+
+def _validate_correction_value(target: str, value: object) -> Any:
+    if "/" in target[1:]:
+        section, name = target.removeprefix("/").split("/", maxsplit=1)
+    else:
+        section, name = "", ""
+    if section == "observations":
+        return _validate_observation_value(name, value)
+    if section == "inferences":
+        return _validate_inference_value(name, value)
+    if target == "/subject_attributions":
+        participants = _string_set(value)
+        if not all(PARTICIPANT_ID_PATTERN.fullmatch(item) for item in participants):
+            raise _problem("CATALOG_FIELD_VALUE", "Subject Attribution ID is invalid")
+        return participants
+    raise _problem("CATALOG_CORRECTION_INVALID", "Correction target is not allowed")
 
 
 def _validate_observations(value: object, runs: Mapping[str, object]) -> JsonObject:
@@ -209,18 +347,9 @@ def _validate_observations(value: object, runs: Mapping[str, object]) -> JsonObj
                 else "CATALOG_UNKNOWN_FIELD"
             )
             raise _problem(code, "Observation must contain value and run_id")
-        claim_value = claim["value"]
-        if name in {"pixel_width", "pixel_height"} and (
-            not _is_int(claim_value) or claim_value <= 0
-        ):
-            raise _problem("CATALOG_FIELD_VALUE", "pixel dimensions must be positive integers")
-        if name == "orientation" and (
-            not _is_int(claim_value) or not 1 <= claim_value <= 8
-        ):
-            raise _problem("CATALOG_FIELD_VALUE", "orientation must be from 1 through 8")
         normalized[name] = {
-            "value": _canonical_value(claim_value),
-            "run_id": _validate_run_reference(claim["run_id"], runs),
+            "value": _validate_observation_value(name, claim["value"]),
+            "run_id": _validate_run_reference(claim["run_id"], runs, "extraction"),
         }
     return normalized
 
@@ -245,9 +374,9 @@ def _validate_inferences(value: object, runs: Mapping[str, object]) -> JsonObjec
         ):
             raise _problem("CATALOG_FIELD_VALUE", "Inference confidence must be finite from 0 to 1")
         normalized[name] = {
-            "value": _canonical_value(claim["value"]),
+            "value": _validate_inference_value(name, claim["value"]),
             "confidence": confidence,
-            "run_id": _validate_run_reference(claim["run_id"], runs),
+            "run_id": _validate_run_reference(claim["run_id"], runs, "vision"),
         }
     return normalized
 
@@ -279,18 +408,12 @@ def _validate_corrections(value: object) -> list[JsonObject]:
         actor = _string(correction["actor"])
         ordered: JsonObject = {"target": target, "op": op}
         if op == "set":
-            ordered["value"] = _canonical_value(correction["value"])
+            ordered["value"] = _validate_correction_value(target, correction["value"])
         ordered["at"] = _validate_rfc3339(correction["at"])
         ordered["actor"] = actor
         if "reason" in correction:
             ordered["reason"] = _string(correction["reason"])
         normalized.append(ordered)
-    normalized.sort(
-        key=lambda item: (
-            item["at"],
-            json.dumps(item, ensure_ascii=False, separators=(",", ":")),
-        )
-    )
     return normalized
 
 
@@ -422,54 +545,37 @@ def _sha256_and_size(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def _source_path(workspace: Path, locator: str) -> Path:
-    materials = workspace / "materials"
-    path = workspace.joinpath(*PurePosixPath(locator).parts)
-    try:
-        materials_real = materials.resolve(strict=True)
-        path_real = path.resolve(strict=True)
-        path_real.relative_to(materials_real)
-    except (OSError, ValueError) as error:
-        raise _problem(
-            "CATALOG_SOURCE_INTEGRITY",
-            "Asset Locator does not resolve inside Materials",
-        ) from error
-    current = materials
-    try:
-        if current.is_symlink():
-            raise _problem("CATALOG_SOURCE_INTEGRITY", "Asset Locator traverses a symlink")
-        for part in PurePosixPath(locator).parts[1:]:
-            current = current / part
-            if current.is_symlink():
-                raise _problem("CATALOG_SOURCE_INTEGRITY", "Asset Locator traverses a symlink")
-    except OSError as error:
-        raise _problem(
-            "CATALOG_SOURCE_INTEGRITY", "Asset Locator could not be inspected"
-        ) from error
-    return path_real
+def _records_match_manifest(
+    records: list[JsonObject], manifest: MaterialsManifest
+) -> bool:
+    catalog_assets: ScannedAssets = {
+        record["asset_id"].removeprefix("sha256:"): (
+            record["byte_size"],
+            record["locators"],
+        )
+        for record in records
+    }
+    return catalog_assets == manifest.assets
 
 
-def _validate_integrity(records: list[JsonObject], workspace: Path) -> None:
-    for record in records:
-        expected_digest: str = record["asset_id"].removeprefix("sha256:")
-        expected_size: int = record["byte_size"]
-        for locator in record["locators"]:
-            digest, size = _sha256_and_size(_source_path(workspace, locator))
-            if digest != expected_digest or size != expected_size:
-                raise _problem(
-                    "CATALOG_SOURCE_INTEGRITY",
-                    "Original Asset no longer matches its catalog identity",
-                )
-
-
-def validate_catalog(path: Path, workspace: Path) -> list[JsonObject]:
+def validate_catalog(
+    path: Path,
+    workspace: Path,
+    *,
+    manifest: MaterialsManifest | None = None,
+) -> list[JsonObject]:
     records = _load_catalog(path)
     _validate_whole_catalog(records)
-    _validate_integrity(records, workspace)
+    current = manifest if manifest is not None else inspect_materials(workspace)
+    if not _records_match_manifest(records, current):
+        raise _problem(
+            "CATALOG_SOURCE_INTEGRITY",
+            "catalog does not match the complete current Materials manifest",
+        )
     return records
 
 
-def _scan_materials(workspace: Path) -> dict[str, tuple[int, list[str]]]:
+def _scan_materials(workspace: Path) -> ScannedAssets:
     materials = workspace / "materials"
     try:
         if not materials.exists():
@@ -528,6 +634,22 @@ def _scan_materials(workspace: Path) -> dict[str, tuple[int, list[str]]]:
     return assets
 
 
+def inspect_materials(workspace: Path) -> MaterialsManifest:
+    assets = _scan_materials(workspace)
+    base_records = [
+        {
+            "asset_id": f"sha256:{digest}",
+            "byte_size": byte_size,
+            "locators": sorted(set(locators)),
+        }
+        for digest, (byte_size, locators) in sorted(assets.items())
+    ]
+    serialized = json.dumps(
+        base_records, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return MaterialsManifest(assets=assets, digest=hashlib.sha256(serialized).hexdigest())
+
+
 def _serialize(records: list[JsonObject]) -> str:
     return "".join(
         json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -550,7 +672,8 @@ def scan_catalog(workspace: Path) -> int:
     except OSError as error:
         raise _problem("CATALOG_IO_ERROR", "catalog could not be inspected") from error
 
-    scanned = _scan_materials(workspace)
+    manifest = inspect_materials(workspace)
+    scanned = manifest.assets
     records: list[JsonObject] = []
     for digest, (byte_size, locators) in sorted(scanned.items()):
         asset_id = f"sha256:{digest}"

@@ -12,7 +12,7 @@ from typing import Literal, TypedDict, cast
 import yaml
 
 from wedding_film.adapters import required_credentials
-from wedding_film.catalog import CatalogProblem, validate_catalog
+from wedding_film.catalog import CatalogProblem, inspect_materials, validate_catalog
 from wedding_film.config import (
     ConfigProblem,
     ProjectConfig,
@@ -319,11 +319,20 @@ def _canonical_fact(
 
 def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
     catalog = workspace / "catalog.jsonl"
-    hashes, hash_error = _current_hashes(
-        {"materials": workspace / "materials"}, "SEMANTIC_CATALOG", "semantic_catalog"
-    )
-    if hash_error is not None:
-        return hash_error
+    manifest = None
+    hashes: dict[str, str] = {}
+    if _usable(materials):
+        try:
+            manifest = inspect_materials(workspace)
+            hashes["materials"] = manifest.digest
+        except CatalogProblem as problem:
+            return _fact(
+                "invalid",
+                problem.code,
+                problem.message,
+                [str(workspace / "materials")],
+                phase="semantic_catalog",
+            )
     preflight = _artifact_preflight(
         catalog,
         "SEMANTIC_CATALOG",
@@ -337,8 +346,18 @@ def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
             preflight["next_commands"] = [_command(workspace, "catalog scan")]
         return preflight
     try:
-        validate_catalog(catalog, workspace)
+        validate_catalog(catalog, workspace, manifest=manifest)
     except CatalogProblem as problem:
+        if problem.code == "CATALOG_SOURCE_INTEGRITY":
+            return _fact(
+                "stale",
+                "CATALOG_SCAN_REQUIRED",
+                "Materials changed after the current catalog scan",
+                [str(catalog)],
+                phase="semantic_catalog",
+                upstream_hashes=hashes,
+                next_commands=[_command(workspace, "catalog scan")],
+            )
         return _fact(
             "invalid",
             problem.code,
