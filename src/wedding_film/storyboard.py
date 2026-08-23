@@ -15,7 +15,7 @@ from wedding_film.story import (
     Diagnostic,
     DuplicateFieldError,
     StrictLoader,
-    story_moment_ids,
+    load_story_document,
     validate_story,
 )
 
@@ -198,7 +198,7 @@ def parse_storyboard(path: Path) -> tuple[dict[str, Any] | None, list[Diagnostic
         item_type = item.get("type")
         common = {"item_id", "type", "story_moment", "duration_frames"}
         required = common | ({"script_block"} if item_type == "card" else {"asset_id", "motion"})
-        optional = {"transition"} | ({"caption"} if item_type == "photo" else set())
+        optional = {"transition"} | ({"script_block"} if item_type == "photo" else set())
         if item_type not in {"card", "photo"}:
             return _fail(
                 path,
@@ -265,15 +265,15 @@ def parse_storyboard(path: Path) -> tuple[dict[str, Any] | None, list[Diagnostic
                     f"{location}.motion",
                     "motion is unsupported",
                 )
-            caption = item.get("caption")
+            caption = item.get("script_block")
             if caption is not None and (
                 not isinstance(caption, str) or _ID.fullmatch(caption) is None
             ):
                 return _fail(
                     path,
                     "STORYBOARD_SCRIPT_BLOCK_INVALID",
-                    f"{location}.caption",
-                    "caption must be kebab-case",
+                    f"{location}.script_block",
+                    "script_block must be kebab-case",
                 )
         total += duration
         transition = item.get("transition")
@@ -333,20 +333,27 @@ def parse_storyboard(path: Path) -> tuple[dict[str, Any] | None, list[Diagnostic
         "sequence": normalized_sequence,
         "total_frames": total,
     }
+    seen_cue_ids: set[str] = set()
     for cue_kind in ("narration_cues", "music_cues"):
         if cue_kind not in root:
             continue
         cues = root[cue_kind]
         if not isinstance(cues, list):
             return _fail(path, "STORYBOARD_CUES_INVALID", f"$.{cue_kind}", "cues must be a list")
+        if not cues:
+            return _fail(
+                path,
+                "STORYBOARD_CUES_EMPTY",
+                f"$.{cue_kind}",
+                "empty cue collections must be omitted",
+            )
         normalized_cues: list[dict[str, Any]] = []
-        seen_cues: set[str] = set()
         ranges: list[tuple[int, int]] = []
         for index, raw_cue in enumerate(cues):
             cue = _mapping(raw_cue)
             location = f"$.{cue_kind}[{index}]"
             required = (
-                {"block_id", "start_frame", "duration_frames"}
+                {"cue_id", "block_id", "start_frame", "duration_frames"}
                 if cue_kind == "narration_cues"
                 else {"cue_id", "start_frame", "duration_frames", "intent"}
             )
@@ -356,20 +363,19 @@ def parse_storyboard(path: Path) -> tuple[dict[str, Any] | None, list[Diagnostic
                     if cue is not None
                     else _fail(path, "STORYBOARD_CUE_INVALID", location, "cue must be a mapping")
                 )
-            cue_id = cue["block_id" if cue_kind == "narration_cues" else "cue_id"]
+            cue_id = cue["cue_id"]
             if not isinstance(cue_id, str) or _ID.fullmatch(cue_id) is None:
                 return _fail(
                     path, "STORYBOARD_CUE_ID_INVALID", location, "cue ID must be kebab-case"
                 )
-            if cue_kind == "music_cues" and cue_id in seen_cues:
+            if cue_id in seen_cue_ids:
                 return _fail(
                     path,
                     "STORYBOARD_CUE_ID_DUPLICATE",
                     location,
                     f"cue ID {cue_id} appears more than once",
                 )
-            if cue_kind == "music_cues":
-                seen_cues.add(cue_id)
+            seen_cue_ids.add(cue_id)
             start, cue_duration = cue["start_frame"], cue["duration_frames"]
             if (
                 not _nonnegative_int(start)
@@ -423,11 +429,14 @@ def validate_storyboard(
         return None, diagnostics, []
     warnings: list[WarningMessage] = []
     moments: set[str] | None = None
+    target_duration: int | float | None = None
     script: ScriptDocument | None = None
     assets: set[str] | None = None
     if story_path is not None and not validate_story(story_path):
         try:
-            moments = set(story_moment_ids(story_path))
+            story = load_story_document(story_path)
+            moments = story["moment_ids"]
+            target_duration = story["target_duration_seconds"]
             if document["inputs"]["story"] != _sha256(story_path):
                 warnings.append(
                     _warning(
@@ -547,7 +556,7 @@ def validate_storyboard(
             references = (
                 [("script_block", "card")]
                 if item["type"] == "card"
-                else ([("caption", "caption")] if "caption" in item else [])
+                else ([("script_block", "caption")] if "script_block" in item else [])
             )
             for field, expected_type in references:
                 block_id = item[field]
@@ -582,17 +591,41 @@ def validate_storyboard(
         for index, cue in enumerate(document.get("narration_cues", [])):
             block_id = cue["block_id"]
             block = blocks.get(block_id)
-            if block is None or block["type"] != "narration":
-                warnings.append(
-                    _warning(
-                        storyboard_path,
-                        "STORYBOARD_CUE_UNRESOLVED",
-                        f"$.narration_cues[{index}].block_id",
-                        f"Narration cue {block_id} is unresolved",
-                    )
+            if block is None:
+                return (
+                    document,
+                    [
+                        _diagnostic(
+                            storyboard_path,
+                            "STORYBOARD_SCRIPT_BLOCK_UNKNOWN",
+                            f"$.narration_cues[{index}].block_id",
+                            f"Script Block {block_id} does not exist",
+                        )
+                    ],
+                    [],
                 )
-            else:
-                used_blocks.add(block_id)
+            if block["type"] != "narration":
+                return (
+                    document,
+                    [
+                        _diagnostic(
+                            storyboard_path,
+                            "STORYBOARD_SCRIPT_BLOCK_MISMATCH",
+                            f"$.narration_cues[{index}].block_id",
+                            "Narration cue must reference a narration Script Block",
+                        )
+                    ],
+                    [],
+                )
+            used_blocks.add(block_id)
+            warnings.append(
+                _warning(
+                    storyboard_path,
+                    "STORYBOARD_NARRATION_NOT_RENDERED",
+                    f"$.narration_cues[{index}]",
+                    f"Narration cue {cue['cue_id']} is authored but not rendered",
+                )
+            )
         unused_blocks = sorted(set(blocks) - used_blocks)
         if unused_blocks:
             warnings.append(
@@ -627,30 +660,37 @@ def validate_storyboard(
                     f"Story Moment {unused_moments[0]} is unused",
                 )
             )
-    if story_path is not None and moments is not None:
-        try:
-            lines = story_path.read_text(encoding="utf-8").splitlines()
-            duration_line = next(
-                line for line in lines if line.startswith("target_duration_seconds:")
+    for index, cue in enumerate(document.get("music_cues", [])):
+        warnings.append(
+            _warning(
+                storyboard_path,
+                "STORYBOARD_MUSIC_UNRESOLVED",
+                f"$.music_cues[{index}]",
+                f"Music cue {cue['cue_id']} is authored but unresolved",
             )
-            target = float(duration_line.partition(":")[2].strip())
-            actual = document["total_frames"] / document["output"]["fps"]
-            if actual != target:
-                warnings.append(
-                    _warning(
-                        storyboard_path,
-                        "STORYBOARD_RUNTIME_DEVIATION",
-                        "$.sequence",
-                        f"runtime {actual:g}s differs from Story target {target:g}s",
-                    )
+        )
+    if target_duration is not None:
+        target = float(target_duration)
+        actual = document["total_frames"] / document["output"]["fps"]
+        if abs(actual - target) / target >= 0.1:
+            warnings.append(
+                _warning(
+                    storyboard_path,
+                    "STORYBOARD_RUNTIME_DEVIATION",
+                    "$.sequence",
+                    f"runtime {actual:g}s differs from Story target {target:g}s",
                 )
-        except (OSError, StopIteration, ValueError, ZeroDivisionError):
-            pass
+            )
     return document, [], warnings
 
 
 def write_storyboard_validation(
-    workspace: Path, as_json: bool, strict: bool, *, integrated: bool = False
+    workspace: Path,
+    as_json: bool,
+    strict: bool,
+    *,
+    integrated: bool = False,
+    upstream_warnings: list[WarningMessage] | None = None,
 ) -> int:
     storyboard = workspace / "storyboard.yaml"
     document, diagnostics, warnings = validate_storyboard(
@@ -661,8 +701,9 @@ def write_storyboard_validation(
         workspace,
         require_catalog_integrity=integrated,
     )
-    if strict and warnings and not diagnostics:
-        diagnostics = [Diagnostic(**warnings[0])]
+    warnings = [*(upstream_warnings or []), *warnings]
+    if strict and warnings:
+        diagnostics = [*(Diagnostic(**warning) for warning in warnings), *diagnostics]
         warnings = []
     payload: StoryboardValidationPayload = {
         "artifact": str(storyboard),

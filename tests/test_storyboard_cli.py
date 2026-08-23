@@ -44,9 +44,10 @@ sequence:
     duration_frames: 120
     asset_id: {asset_id}
     motion: slow-zoom-in
-    caption: ceremony-caption
+    script_block: ceremony-caption
 narration_cues:
-  - block_id: ceremony-narration
+  - cue_id: ceremony-voiceover
+    block_id: ceremony-narration
     start_frame: 60
     duration_frames: 100
 music_cues:
@@ -82,7 +83,11 @@ def test_storyboard_validate_accepts_strict_v1_and_computes_exact_frames(tmp_pat
     assert result.returncode == 0, result.stderr
     assert payload["state"] == "complete-with-warnings"
     assert payload["document"]["total_frames"] == 180
-    assert payload["warnings"][0]["code"] == "STORYBOARD_RUNTIME_DEVIATION"
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "STORYBOARD_NARRATION_NOT_RENDERED",
+        "STORYBOARD_MUSIC_UNRESOLVED",
+        "STORYBOARD_RUNTIME_DEVIATION",
+    }
 
 
 def test_top_level_validate_checks_storyboard_references_and_strict_warnings(
@@ -105,7 +110,9 @@ def test_top_level_validate_checks_storyboard_references_and_strict_warnings(
     workspace, _ = authored_workspace(tmp_path / "strict")
     strict = run_cli("--project", str(workspace), "validate", "--strict", "--json")
     assert strict.returncode == 1
-    assert json.loads(strict.stdout)["diagnostics"][0]["code"] == ("STORYBOARD_RUNTIME_DEVIATION")
+    assert json.loads(strict.stdout)["diagnostics"][0]["code"] == (
+        "STORYBOARD_NARRATION_NOT_RENDERED"
+    )
 
 
 def test_storyboard_rejects_duplicate_yaml_and_invalid_crossfade(tmp_path: Path) -> None:
@@ -138,6 +145,13 @@ def test_storyboard_rejects_duplicate_yaml_and_invalid_crossfade(tmp_path: Path)
         (("  fps: 24", "  fps: 24\n  codec: h264"), "STORYBOARD_UNKNOWN_FIELD"),
         (("item_id: portrait", "item_id: opening"), "STORYBOARD_ITEM_ID_DUPLICATE"),
         (("motion: slow-zoom-in", "motion: pan-left"), "STORYBOARD_MOTION_UNSUPPORTED"),
+        (
+            (
+                "motion: slow-zoom-in\n    script_block: ceremony-caption",
+                "motion: slow-zoom-in\n    caption: ceremony-caption",
+            ),
+            "STORYBOARD_UNKNOWN_FIELD",
+        ),
         (("type: card", "type: card\n    mystery: value"), "STORYBOARD_UNKNOWN_FIELD"),
         (("type: crossfade", "type: cut"), "STORYBOARD_UNKNOWN_FIELD"),
         (("start_frame: 60", "start_frame: 100"), "STORYBOARD_CUE_BOUNDS_INVALID"),
@@ -160,7 +174,11 @@ def test_storyboard_rejects_same_kind_cue_overlap_and_allows_asset_reuse(tmp_pat
     source = storyboard.read_text()
     source = source.replace(
         "music_cues:",
-        "  - block_id: opening-card\n    start_frame: 80\n    duration_frames: 20\nmusic_cues:",
+        "  - cue_id: second-voiceover\n"
+        "    block_id: ceremony-narration\n"
+        "    start_frame: 80\n"
+        "    duration_frames: 20\n"
+        "music_cues:",
     )
     storyboard.write_text(source)
     overlap = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
@@ -179,22 +197,119 @@ def test_storyboard_rejects_same_kind_cue_overlap_and_allows_asset_reuse(tmp_pat
     assert result.returncode == 0, result.stdout
 
 
-def test_unresolved_narration_is_warning_and_stale_hash_is_strict_error(tmp_path: Path) -> None:
+def test_broken_narration_is_structural_and_stale_hash_is_strict_error(tmp_path: Path) -> None:
     workspace, _ = authored_workspace(tmp_path)
     storyboard = workspace / "storyboard.yaml"
     storyboard.write_text(storyboard.read_text().replace("ceremony-narration", "missing-voice"))
-    warning = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
-    payload = json.loads(warning.stdout)
-    assert warning.returncode == 0
-    assert "STORYBOARD_CUE_UNRESOLVED" in {item["code"] for item in payload["warnings"]}
-    assert payload["document"]["narration_cues"][0]["block_id"] == "missing-voice"
+    broken = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert broken.returncode == 1
+    assert json.loads(broken.stdout)["diagnostics"][0]["code"] == (
+        "STORYBOARD_SCRIPT_BLOCK_UNKNOWN"
+    )
 
+    workspace, _ = authored_workspace(tmp_path / "stale")
+    storyboard = workspace / "storyboard.yaml"
     storyboard.write_text(
         storyboard.read_text().replace("sha256:", "sha256:" + "0" * 64 + " # ", 1)
     )
     stale = run_cli("--project", str(workspace), "storyboard", "validate", "--strict", "--json")
     assert stale.returncode == 1
     assert json.loads(stale.stdout)["diagnostics"][0]["code"].endswith("HASH_STALE")
+
+
+def test_cue_ids_and_empty_collections_are_strict(tmp_path: Path) -> None:
+    workspace, _ = authored_workspace(tmp_path)
+    storyboard = workspace / "storyboard.yaml"
+    storyboard.write_text(storyboard.read_text().replace("  - cue_id:", "  - block_id:", 1))
+    missing_id = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert missing_id.returncode == 1
+    assert json.loads(missing_id.stdout)["diagnostics"][0]["code"] in {
+        "STORYBOARD_DUPLICATE_FIELD",
+        "STORYBOARD_MISSING_FIELD",
+    }
+
+    workspace, _ = authored_workspace(tmp_path / "empty")
+    storyboard = workspace / "storyboard.yaml"
+    storyboard.write_text(
+        storyboard.read_text()[: storyboard.read_text().index("narration_cues:")]
+        + "narration_cues: []\n"
+    )
+    empty = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert empty.returncode == 1
+    assert json.loads(empty.stdout)["diagnostics"][0]["code"] == "STORYBOARD_CUES_EMPTY"
+
+
+def test_narration_cue_ids_are_unique_and_blocks_must_be_narration(tmp_path: Path) -> None:
+    workspace, _ = authored_workspace(tmp_path)
+    storyboard = workspace / "storyboard.yaml"
+    storyboard.write_text(
+        storyboard.read_text().replace(
+            "music_cues:",
+            "  - cue_id: ceremony-voiceover\n"
+            "    block_id: ceremony-narration\n"
+            "    start_frame: 0\n"
+            "    duration_frames: 20\n"
+            "music_cues:",
+        )
+    )
+    duplicate = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert duplicate.returncode == 1
+    assert json.loads(duplicate.stdout)["diagnostics"][0]["code"] == ("STORYBOARD_CUE_ID_DUPLICATE")
+
+    workspace, _ = authored_workspace(tmp_path / "cross-kind-duplicate")
+    storyboard = workspace / "storyboard.yaml"
+    storyboard.write_text(
+        storyboard.read_text().replace("cue_id: gentle-score", "cue_id: ceremony-voiceover")
+    )
+    duplicate = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert duplicate.returncode == 1
+    assert json.loads(duplicate.stdout)["diagnostics"][0]["code"] == ("STORYBOARD_CUE_ID_DUPLICATE")
+
+    workspace, _ = authored_workspace(tmp_path / "wrong-type")
+    storyboard = workspace / "storyboard.yaml"
+    storyboard.write_text(
+        storyboard.read_text().replace("block_id: ceremony-narration", "block_id: opening-card")
+    )
+    incompatible = run_cli("--project", str(workspace), "storyboard", "validate", "--json")
+    assert incompatible.returncode == 1
+    assert json.loads(incompatible.stdout)["diagnostics"][0]["code"] == (
+        "STORYBOARD_SCRIPT_BLOCK_MISMATCH"
+    )
+
+
+def test_runtime_threshold_uses_story_owned_yaml_value(tmp_path: Path) -> None:
+    workspace, asset_id = authored_workspace(tmp_path)
+    story = valid_story().replace("target_duration_seconds: 300", '"target_duration_seconds": 7.6')
+    script = valid_script(story)
+    catalog = (workspace / "catalog.jsonl").read_text()
+    (workspace / "story.md").write_text(story)
+    (workspace / "script.md").write_text(script)
+    (workspace / "storyboard.yaml").write_text(valid_storyboard(story, script, catalog, asset_id))
+
+    payload = json.loads(
+        run_cli("--project", str(workspace), "storyboard", "validate", "--json").stdout
+    )
+    assert "STORYBOARD_RUNTIME_DEVIATION" not in {
+        warning["code"] for warning in payload["warnings"]
+    }
+
+
+def test_integrated_validation_aggregates_script_and_storyboard_warnings(
+    tmp_path: Path,
+) -> None:
+    workspace, _ = authored_workspace(tmp_path)
+    story = workspace / "story.md"
+    story.write_text(story.read_text().replace("式を迎える朝。", "新しい朝。"))
+
+    default = run_cli("--project", str(workspace), "validate", "--json")
+    codes = {warning["code"] for warning in json.loads(default.stdout)["warnings"]}
+    assert default.returncode == 0
+    assert "SCRIPT_STORY_HASH_STALE" in codes
+    assert "STORYBOARD_MUSIC_UNRESOLVED" in codes
+
+    strict = run_cli("--project", str(workspace), "validate", "--strict", "--json")
+    assert strict.returncode == 1
+    assert json.loads(strict.stdout)["diagnostics"][0]["code"] == ("SCRIPT_STORY_HASH_STALE")
 
 
 def test_status_uses_storyboard_validator(tmp_path: Path) -> None:

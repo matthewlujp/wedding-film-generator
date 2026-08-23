@@ -161,9 +161,15 @@ def write_validation(workspace: Path, as_json: bool, strict: bool) -> int:
     _, script_diagnostics, script_warnings = validate_script(
         workspace / "script.md", workspace / "story.md"
     )
-    if script_diagnostics or (strict and script_warnings):
+    if script_diagnostics:
         return write_script_validation(workspace, as_json, strict)
-    return write_storyboard_validation(workspace, as_json, strict, integrated=True)
+    return write_storyboard_validation(
+        workspace,
+        as_json,
+        strict,
+        integrated=True,
+        upstream_warnings=script_warnings,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

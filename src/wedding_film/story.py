@@ -25,6 +25,13 @@ class ValidationPayload(TypedDict):
     diagnostics: list[Diagnostic]
 
 
+class StoryDocument(TypedDict):
+    schema_version: int
+    title: str
+    target_duration_seconds: int | float
+    moment_ids: set[str]
+
+
 _SECTION = re.compile(r"^ {0,3}## (.+)$")
 _MOMENT = re.compile(r"^ {0,3}### (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -412,15 +419,28 @@ def validate_story(path: Path) -> list[Diagnostic]:
     return []
 
 
-def story_moment_ids(path: Path) -> set[str]:
-    """Return Moment IDs from an already validated Story document."""
+def load_story_document(path: Path) -> StoryDocument:
+    """Load the representation of an already validated Story document."""
     lines = path.read_text(encoding="utf-8").splitlines()
     closing = lines.index("---", 1)
-    return {
+    metadata = yaml.load("\n".join(lines[1:closing]), Loader=StrictLoader)
+    assert isinstance(metadata, dict)
+    moments = {
         match.group(1)
         for _, line in _markdown_structure(lines, closing + 1)
         if (match := _MOMENT.fullmatch(line))
     }
+    return {
+        "schema_version": metadata["schema_version"],
+        "title": metadata["title"],
+        "target_duration_seconds": metadata["target_duration_seconds"],
+        "moment_ids": moments,
+    }
+
+
+def story_moment_ids(path: Path) -> set[str]:
+    """Return Moment IDs from an already validated Story document."""
+    return load_story_document(path)["moment_ids"]
 
 
 def _diagnostic(path: Path, code: str, location: str, message: str) -> Diagnostic:
