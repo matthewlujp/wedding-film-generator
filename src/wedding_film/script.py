@@ -61,10 +61,21 @@ _RICH_BLOCK_LINE = re.compile(
     r"(?:[-*_]\s*){3,}$|\[[^]]+\]:\s))"
 )
 _SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)\s*$")
+_HTML_BLOCK_OPEN = re.compile(
+    r"^ {0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|"
+    r"col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|"
+    r"form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|"
+    r"menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|"
+    r"tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|/?>|$)",
+    re.IGNORECASE,
+)
 _RICH_SPAN = re.compile(
     r"(`+)(?=\S)(?:(?!\1).)+?\1|"
     r"!\[|\[[^]]*\](?:\([^)]*\)|\[[^]]*\])|"
-    r"</?[A-Za-z][^>]*>|<[!?]|<(?:https?://|mailto:)[^>]*>|<[^ >]+@[^ >]+>|"
+    r"</?[A-Za-z][A-Za-z0-9-]*"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*\s*/?>|"
+    r"<[!?]|<(?:https?://|mailto:)[^>]*>|<[^ >]+@[^ >]+>|"
     r"<!--|-->|&(?:#\d+|#x[0-9A-Fa-f]+|\w+);|"
     r"\\(?:[!\"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|$)|"
     r"\*(?=\S)(?:(?!\n\n).)*?(?<=\S)\*|"
@@ -90,7 +101,7 @@ def _invalid(
 
 def _is_plain_unicode(lines: list[str]) -> bool:
     for index, line in enumerate(lines):
-        if _RICH_BLOCK_LINE.match(line):
+        if _RICH_BLOCK_LINE.match(line) or _HTML_BLOCK_OPEN.match(line):
             return False
         if index > 0 and lines[index - 1].strip() and _SETEXT_UNDERLINE.fullmatch(line):
             return False

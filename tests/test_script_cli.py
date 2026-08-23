@@ -503,3 +503,38 @@ def test_script_accepts_literal_punctuation_that_is_not_markdown(tmp_path: Path)
 
     assert result.returncode == 0, result.stdout
     assert payload["document"]["blocks"][1]["body"] == body
+
+
+def test_script_rejects_incomplete_commonmark_html_block_opener(tmp_path: Path) -> None:
+    workspace = tmp_path / "incomplete-html-block"
+    workspace.mkdir()
+    story = valid_story()
+    (workspace / "story.md").write_text(story, encoding="utf-8")
+    (workspace / "script.md").write_text(
+        valid_script(story).replace("永遠のはじまり", "<div\n永遠のはじまり"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "script", "validate", "--json")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["diagnostics"][0]["code"] == (
+        "SCRIPT_BLOCK_BODY_RICH_TEXT"
+    )
+
+
+def test_script_accepts_non_html_angle_bracket_punctuation(tmp_path: Path) -> None:
+    workspace = tmp_path / "literal-angle-brackets"
+    workspace.mkdir()
+    story = valid_story()
+    body = "2 < 3\n<divine\n記念日 <永遠>"
+    (workspace / "story.md").write_text(story, encoding="utf-8")
+    (workspace / "script.md").write_text(
+        valid_script(story).replace("永遠のはじまり", body), encoding="utf-8"
+    )
+
+    result = run_cli("--project", str(workspace), "script", "validate", "--json")
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0, result.stdout
+    assert payload["document"]["blocks"][1]["body"] == body
