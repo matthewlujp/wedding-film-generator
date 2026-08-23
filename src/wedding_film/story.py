@@ -323,8 +323,8 @@ def validate_story(path: Path) -> list[Diagnostic]:
     if (
         isinstance(duration, bool)
         or not isinstance(duration, int | float)
-        or not math.isfinite(duration)
         or duration <= 0
+        or (isinstance(duration, float) and not math.isfinite(duration))
     ):
         return [
             _diagnostic(

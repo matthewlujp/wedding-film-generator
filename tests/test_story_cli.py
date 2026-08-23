@@ -277,6 +277,43 @@ def test_validate_rejects_non_finite_and_boolean_target_durations(tmp_path: Path
         assert diagnostic["location"] == "frontmatter.target_duration_seconds"
 
 
+def test_validate_handles_arbitrary_size_integer_target_durations_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    huge = "1" + "0" * 400
+    valid_workspace = tmp_path / "huge-positive-duration"
+    valid_workspace.mkdir()
+    (valid_workspace / "story.md").write_text(
+        valid_story().replace(
+            "target_duration_seconds: 300", f"target_duration_seconds: {huge}"
+        ),
+        encoding="utf-8",
+    )
+
+    valid = run_cli("--project", str(valid_workspace), "validate", "--json")
+
+    assert valid.returncode == 0, valid.stderr
+    assert "Traceback" not in valid.stderr
+    assert json.loads(valid.stdout)["diagnostics"] == []
+
+    invalid_workspace = tmp_path / "huge-negative-duration"
+    invalid_workspace.mkdir()
+    (invalid_workspace / "story.md").write_text(
+        valid_story().replace(
+            "target_duration_seconds: 300", f"target_duration_seconds: -{huge}"
+        ),
+        encoding="utf-8",
+    )
+
+    invalid = run_cli("--project", str(invalid_workspace), "validate", "--json")
+
+    assert invalid.returncode == 1
+    assert "Traceback" not in invalid.stderr
+    diagnostic = json.loads(invalid.stdout)["diagnostics"][0]
+    assert diagnostic["code"] == "STORY_FRONTMATTER_INVALID_VALUE"
+    assert diagnostic["location"] == "frontmatter.target_duration_seconds"
+
+
 def test_validate_reports_malformed_yaml_without_a_traceback(tmp_path: Path) -> None:
     workspace = tmp_path / "malformed-yaml"
     workspace.mkdir()
