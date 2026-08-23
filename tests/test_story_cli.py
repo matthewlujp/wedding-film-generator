@@ -74,6 +74,44 @@ def test_validate_treats_headings_in_fenced_code_as_ordinary_markdown(tmp_path: 
     assert result.returncode == 0, result.stdout
 
 
+def test_validate_ignores_headings_inside_closed_and_unterminated_html_comments(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "commented-headings"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(
+        valid_story()
+        .replace(
+            "二人の歩みと **家族への感謝** を伝える。",
+            "二人の歩みを伝える。\n\n<!--\n## Draft Section\n### Draft_Moment\n-->",
+        )
+        .replace(
+            "誓いと笑顔を家族や友人と分かち合う。",
+            "誓いと笑顔を分かち合う。\n\n<!-- unfinished\n## Hidden Section\n### hidden-moment",
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_validate_counts_markdown_autolinks_as_visible_prose(tmp_path: Path) -> None:
+    workspace = tmp_path / "autolink-prose"
+    workspace.mkdir()
+    (workspace / "story.md").write_text(
+        valid_story()
+        .replace("二人の歩みと **家族への感謝** を伝える。", "<https://example.com/story>")
+        .replace("Quiet anticipationから、祝福に満ちた喜びへ。", "<editor@example.com>"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("--project", str(workspace), "validate", "--json")
+
+    assert result.returncode == 0, result.stdout
+
+
 def test_validate_accepts_markdown_headings_indented_by_up_to_three_spaces(
     tmp_path: Path,
 ) -> None:
@@ -258,12 +296,12 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
             base.replace("二人の歩みと **家族への感謝** を伝える。", "<!-- author note only -->"),
             "STORY_SECTION_EMPTY",
         ),
-        "unfinished-comment-intent": (
+        "unfinished-comment-moment": (
             base.replace(
-                "二人の歩みと **家族への感謝** を伝える。",
+                "誓いと笑顔を家族や友人と分かち合う。",
                 "<!-- unfinished comment",
             ),
-            "STORY_SECTION_EMPTY",
+            "STORY_MOMENT_EMPTY",
         ),
         "empty-fence-arc": (
             base.replace(
@@ -286,6 +324,14 @@ def test_validate_rejects_formatting_without_visible_prose(tmp_path: Path) -> No
         ),
         "non-breaking-space-moment": (
             base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "&#160;"),
+            "STORY_MOMENT_EMPTY",
+        ),
+        "zero-width-space-intent": (
+            base.replace("二人の歩みと **家族への感謝** を伝える。", "\u200b"),
+            "STORY_SECTION_EMPTY",
+        ),
+        "zero-width-space-moment": (
+            base.replace("静かな朝。指輪を手に、これから始まる一日を思う。", "\u200b\u200d"),
             "STORY_MOMENT_EMPTY",
         ),
     }

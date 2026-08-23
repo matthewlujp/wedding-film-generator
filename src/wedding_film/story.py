@@ -4,6 +4,7 @@ import html
 import json
 import math
 import re
+import unicodedata
 from pathlib import Path
 from typing import TypedDict
 
@@ -29,7 +30,21 @@ _MOMENT = re.compile(r"^ {0,3}### (.+)$")
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _HTML_COMMENT = re.compile(r"<!--(?:.*?-->|.*\Z)", re.DOTALL)
-_HTML_TAG = re.compile(r"<[^>]+>")
+_HTML_TAG = re.compile(
+    r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*?)?\s*/?>|<![A-Z][^<>]*>|<\?[^<>]*\?>"
+)
+_DEFAULT_IGNORABLE_RANGES = (
+    (0x034F, 0x034F),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFFA0, 0xFFA0),
+    (0x1BCA0, 0x1BCAF),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
 
 
 class DuplicateFieldError(yaml.YAMLError):
@@ -56,12 +71,27 @@ def _strict_mapping(loader: StrictLoader, node: MappingNode) -> dict[object, obj
 StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_mapping)
 
 
+def _mask_html_comments(text: str) -> str:
+    return _HTML_COMMENT.sub(
+        lambda match: "".join("\n" if character == "\n" else " " for character in match.group()),
+        text,
+    )
+
+
+def _is_default_ignorable(character: str) -> bool:
+    codepoint = ord(character)
+    return unicodedata.category(character) in {"Cc", "Cf", "Cs"} or any(
+        start <= codepoint <= end for start, end in _DEFAULT_IGNORABLE_RANGES
+    )
+
+
 def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
     """Return lines that can define structure, excluding fenced code blocks."""
     visible: list[tuple[int, str]] = []
     fence_character: str | None = None
     fence_length = 0
-    for index, line in enumerate(lines[start:], start=start):
+    uncommented = _mask_html_comments("\n".join(lines[start:])).split("\n")
+    for index, line in enumerate(uncommented, start=start):
         if fence_character is not None:
             stripped = line.lstrip(" ")
             indentation = len(line) - len(stripped)
@@ -88,7 +118,7 @@ def _markdown_structure(lines: list[str], start: int) -> list[tuple[int, str]]:
 
 
 def _has_visible_prose(lines: list[str]) -> bool:
-    without_comments = _HTML_COMMENT.sub("", "\n".join(lines)).splitlines()
+    without_comments = _mask_html_comments("\n".join(lines)).splitlines()
     fence_character: str | None = None
     fence_length = 0
     content: list[str] = []
@@ -118,7 +148,7 @@ def _has_visible_prose(lines: list[str]) -> bool:
         content.append(line)
     visible = html.unescape(_HTML_TAG.sub("", "\n".join(content)))
     visible = re.sub(r"[\s*_~`#>\[\](){}.!:+\\|=-]", "", visible)
-    return bool(visible)
+    return any(not _is_default_ignorable(character) for character in visible)
 
 
 def validate_story(path: Path) -> list[Diagnostic]:
