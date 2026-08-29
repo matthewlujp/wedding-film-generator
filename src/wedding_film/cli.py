@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import Any, NoReturn, TextIO
 
 import yaml
 
-from wedding_film.catalog import CatalogProblem, scan_catalog
+from wedding_film.catalog import CatalogProblem, JsonObject, load_catalog, scan_catalog
+from wedding_film.catalog_review import (
+    apply_correction,
+    default_actor,
+    effective_values,
+    filter_records,
+    resolve_asset,
+    storyboard_referenced_assets,
+)
 from wedding_film.exif import extract_exif
 from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
@@ -173,6 +182,162 @@ def analyze_batch(
     return PARTIAL_OR_BUDGET_STOP if (result.failed or result.budget_stopped) else SUCCESS
 
 
+def _list_summary(record: JsonObject) -> dict[str, Any]:
+    inferences = record.get("inferences", {})
+    confidences = [claim["confidence"] for claim in inferences.values()]
+    return {
+        "asset_id": record["asset_id"],
+        "locators": record["locators"],
+        "observation_count": len(record.get("observations", {})),
+        "inference_count": len(inferences),
+        "correction_count": len(record.get("corrections", [])),
+        "min_confidence": min(confidences) if confidences else None,
+    }
+
+
+def catalog_list(
+    workspace: Path,
+    asset_ids: list[str],
+    locator_globs: list[str],
+    low_confidence: float | None,
+    in_storyboard: bool,
+    as_json: bool,
+) -> int:
+    try:
+        records = load_catalog(workspace)
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    storyboard_assets = storyboard_referenced_assets(workspace) if in_storyboard else None
+    if in_storyboard and storyboard_assets is None:
+        storyboard_assets = set()
+    filtered = filter_records(
+        records,
+        asset_ids=asset_ids or None,
+        locator_globs=locator_globs or None,
+        low_confidence_threshold=low_confidence,
+        storyboard_assets=storyboard_assets,
+    )
+    summaries = [_list_summary(record) for record in filtered]
+    if as_json:
+        print(json.dumps(summaries, ensure_ascii=False))
+    else:
+        for summary in summaries:
+            print(
+                f"{summary['asset_id']} locator={summary['locators'][0]} "
+                f"(+{len(summary['locators']) - 1}) "
+                f"observations={summary['observation_count']} "
+                f"inferences={summary['inference_count']} "
+                f"corrections={summary['correction_count']} "
+                f"min_confidence={summary['min_confidence']}"
+            )
+    return SUCCESS
+
+
+def catalog_show(workspace: Path, asset: str, as_json: bool) -> int:
+    try:
+        records = load_catalog(workspace)
+        record = resolve_asset(records, asset)
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    effective = effective_values(record)
+    effective_payload = {
+        target: {"value": item.value, "present": item.present, "source": item.source}
+        for target, item in effective.items()
+        if item.source != "none"
+    }
+    if as_json:
+        payload = {
+            "asset_id": record["asset_id"],
+            "locators": record["locators"],
+            "observations": record.get("observations", {}),
+            "inferences": record.get("inferences", {}),
+            "corrections": record.get("corrections", []),
+            "effective": effective_payload,
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        return SUCCESS
+
+    print(f"asset_id={record['asset_id']}")
+    print(f"locators={','.join(record['locators'])}")
+    print("Observations:")
+    for name, claim in sorted(record.get("observations", {}).items()):
+        print(f"  {name} = {claim['value']!r} (run={claim['run_id']})")
+    print("Inferences:")
+    for name, claim in sorted(record.get("inferences", {}).items()):
+        print(
+            f"  {name} = {claim['value']!r} "
+            f"(confidence={claim['confidence']}, run={claim['run_id']})"
+        )
+    print("Corrections:")
+    for index, correction in enumerate(record.get("corrections", []), start=1):
+        detail = f"value={correction['value']!r}" if correction["op"] == "set" else "(removed)"
+        reason = f" reason={correction['reason']!r}" if "reason" in correction else ""
+        print(
+            f"  {index}. {correction['op']} {correction['target']} {detail} "
+            f"at={correction['at']} actor={correction['actor']}{reason}"
+        )
+    print("Effective:")
+    for target in sorted(effective_payload):
+        item = effective_payload[target]
+        value = item["value"] if item["present"] else "<removed>"
+        print(f"  {target} = {value!r} (source={item['source']})")
+    return SUCCESS
+
+
+def catalog_correct(
+    workspace: Path,
+    op: str,
+    target: str,
+    value_json: str | None,
+    actor: str,
+    reason: str | None,
+    asset_ids: list[str],
+    locator_globs: list[str],
+    dry_run: bool,
+) -> int:
+    value: Any = None
+    if op == "set":
+        try:
+            value = json.loads(value_json) if value_json is not None else None
+        except json.JSONDecodeError:
+            _emit_catalog(
+                workspace, "CATALOG_VALUE_INVALID", "--value must be valid JSON", stream=sys.stderr
+            )
+            return INVALID_OR_PREFLIGHT
+    try:
+        result = apply_correction(
+            workspace,
+            target=target,
+            op=op,
+            value=value,
+            actor=actor,
+            reason=reason,
+            asset_ids=asset_ids,
+            locator_globs=locator_globs,
+            dry_run=dry_run,
+        )
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    if dry_run:
+        _emit_catalog(
+            workspace,
+            "CATALOG_CORRECTION_PLAN",
+            f"resolved={result.resolved_count} target={target} op={op} "
+            f"asset_ids={','.join(result.asset_ids)}",
+        )
+    else:
+        _emit_catalog(
+            workspace,
+            "CATALOG_CORRECTED",
+            f"applied={result.resolved_count} target={target} op={op} "
+            f"asset_ids={','.join(result.asset_ids)}",
+        )
+    return SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -252,6 +417,38 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_batch_parser.add_argument("--max-assets", type=int, default=None)
     analyze_batch_parser.add_argument("--max-estimated-usd", type=float, default=None)
     analyze_batch_parser.add_argument("--concurrency", type=int, default=None)
+
+    list_parser = catalog_commands.add_parser("list")
+    list_parser.add_argument("--asset-id", action="append", default=[])
+    list_parser.add_argument("--locator", action="append", default=[])
+    list_parser.add_argument("--low-confidence", type=float, default=None)
+    list_parser.add_argument("--in-storyboard", action="store_true")
+    list_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    show_parser = catalog_commands.add_parser("show")
+    show_parser.add_argument("--asset", required=True)
+    show_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    correct_parser = catalog_commands.add_parser("correct")
+    correct_commands = correct_parser.add_subparsers(dest="correct_command", required=True)
+
+    correct_set = correct_commands.add_parser("set")
+    correct_set.add_argument("--target", required=True)
+    correct_set.add_argument("--value", required=True)
+    correct_set.add_argument("--asset-id", action="append", default=[])
+    correct_set.add_argument("--locator", action="append", default=[])
+    correct_set.add_argument("--actor", default=None)
+    correct_set.add_argument("--reason", default=None)
+    correct_set.add_argument("--dry-run", action="store_true")
+
+    correct_remove = correct_commands.add_parser("remove")
+    correct_remove.add_argument("--target", required=True)
+    correct_remove.add_argument("--asset-id", action="append", default=[])
+    correct_remove.add_argument("--locator", action="append", default=[])
+    correct_remove.add_argument("--actor", default=None)
+    correct_remove.add_argument("--reason", default=None)
+    correct_remove.add_argument("--dry-run", action="store_true")
+
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     validate = commands.add_parser("validate")
@@ -293,6 +490,42 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.max_assets,
                 arguments.max_estimated_usd,
                 arguments.concurrency,
+            )
+        if arguments.command == "catalog" and arguments.catalog_command == "list":
+            return catalog_list(
+                arguments.project,
+                arguments.asset_id,
+                arguments.locator,
+                arguments.low_confidence,
+                arguments.in_storyboard,
+                arguments.as_json,
+            )
+        if arguments.command == "catalog" and arguments.catalog_command == "show":
+            return catalog_show(arguments.project, arguments.asset, arguments.as_json)
+        if arguments.command == "catalog" and arguments.catalog_command == "correct":
+            actor = arguments.actor or default_actor()
+            if arguments.correct_command == "set":
+                return catalog_correct(
+                    arguments.project,
+                    "set",
+                    arguments.target,
+                    arguments.value,
+                    actor,
+                    arguments.reason,
+                    arguments.asset_id,
+                    arguments.locator,
+                    arguments.dry_run,
+                )
+            return catalog_correct(
+                arguments.project,
+                "remove",
+                arguments.target,
+                None,
+                actor,
+                arguments.reason,
+                arguments.asset_id,
+                arguments.locator,
+                arguments.dry_run,
             )
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
