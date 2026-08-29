@@ -483,7 +483,7 @@ def analyze_asset(workspace: Path, asset_id: str) -> AnalysisResult:
             model=config.vision.model,
             prompt_version=config.vision.prompt_version,
             prompt=PROMPT,
-            parameters={},
+            parameters=dict(adapter.default_parameters),
         )
         schema = _schema()
         fingerprint = _fingerprint(
@@ -997,7 +997,7 @@ def run_batch(
         model=config.vision.model,
         prompt_version=config.vision.prompt_version,
         prompt=PROMPT,
-        parameters={},
+        parameters=dict(adapter.default_parameters),
     )
     schema = _schema()
 
