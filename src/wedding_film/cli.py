@@ -23,6 +23,15 @@ from wedding_film.catalog_review import (
     storyboard_referenced_assets,
 )
 from wedding_film.exif import extract_exif
+from wedding_film.participants import (
+    UNSET,
+    Participant,
+    ParticipantProblem,
+    add_participant,
+    load_participants,
+    remove_participant,
+    update_participant,
+)
 from wedding_film.render import RenderProblem, render_rough_cut
 from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
@@ -94,6 +103,16 @@ def _emit(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdo
 def _emit_catalog(workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout) -> None:
     print(
         f"workspace={workspace} phase=catalog artifact=catalog.jsonl code={code} message={message}",
+        file=stream,
+    )
+
+
+def _emit_participant(
+    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=participants artifact=participants.yaml "
+        f"code={code} message={message}",
         file=stream,
     )
 
@@ -363,6 +382,100 @@ def catalog_correct(
     return SUCCESS
 
 
+def _participant_payload(participant: Participant) -> dict[str, Any]:
+    return {
+        "id": participant.id,
+        "display_name": participant.display_name,
+        "role": participant.role,
+        "principal": participant.principal,
+    }
+
+
+def participant_list(workspace: Path, as_json: bool) -> int:
+    try:
+        participants = load_participants(workspace)
+    except ParticipantProblem as problem:
+        _emit_participant(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    payload = [_participant_payload(participant) for participant in participants]
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        for entry in payload:
+            print(
+                f"{entry['id']} display_name={entry['display_name']!r} "
+                f"role={entry['role']!r} principal={entry['principal']}"
+            )
+    return SUCCESS
+
+
+def participant_add(
+    workspace: Path,
+    participant_id: str,
+    display_name: str | None,
+    role: str | None,
+    principal: bool,
+) -> int:
+    try:
+        add_participant(
+            workspace,
+            participant_id=participant_id,
+            display_name=display_name,
+            role=role,
+            principal=principal,
+        )
+    except ParticipantProblem as problem:
+        _emit_participant(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_participant(workspace, "PARTICIPANT_ADDED", f"participant {participant_id} added")
+    return SUCCESS
+
+
+def participant_update(
+    workspace: Path,
+    participant_id: str,
+    display_name: str | None,
+    clear_display_name: bool,
+    role: str | None,
+    clear_role: bool,
+    principal: bool | None,
+) -> int:
+    display_name_arg: Any = UNSET
+    if clear_display_name:
+        display_name_arg = None
+    elif display_name is not None:
+        display_name_arg = display_name
+    role_arg: Any = UNSET
+    if clear_role:
+        role_arg = None
+    elif role is not None:
+        role_arg = role
+    principal_arg: Any = UNSET if principal is None else principal
+    try:
+        update_participant(
+            workspace,
+            participant_id=participant_id,
+            display_name=display_name_arg,
+            role=role_arg,
+            principal=principal_arg,
+        )
+    except ParticipantProblem as problem:
+        _emit_participant(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_participant(workspace, "PARTICIPANT_UPDATED", f"participant {participant_id} updated")
+    return SUCCESS
+
+
+def participant_remove(workspace: Path, participant_id: str) -> int:
+    try:
+        remove_participant(workspace, participant_id=participant_id)
+    except ParticipantProblem as problem:
+        _emit_participant(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_participant(workspace, "PARTICIPANT_REMOVED", f"participant {participant_id} removed")
+    return SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -474,6 +587,33 @@ def build_parser() -> argparse.ArgumentParser:
     correct_remove.add_argument("--reason", default=None)
     correct_remove.add_argument("--dry-run", action="store_true")
 
+    participant = commands.add_parser("participant")
+    participant_commands = participant.add_subparsers(dest="participant_command", required=True)
+
+    participant_list_parser = participant_commands.add_parser("list")
+    participant_list_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    participant_add_parser = participant_commands.add_parser("add")
+    participant_add_parser.add_argument("--id", required=True, dest="participant_id")
+    participant_add_parser.add_argument("--display-name", default=None)
+    participant_add_parser.add_argument("--role", default=None)
+    participant_add_parser.add_argument("--principal", action="store_true")
+
+    participant_update_parser = participant_commands.add_parser("update")
+    participant_update_parser.add_argument("--id", required=True, dest="participant_id")
+    name_group = participant_update_parser.add_mutually_exclusive_group()
+    name_group.add_argument("--display-name", default=None)
+    name_group.add_argument("--clear-display-name", action="store_true")
+    role_group = participant_update_parser.add_mutually_exclusive_group()
+    role_group.add_argument("--role", default=None)
+    role_group.add_argument("--clear-role", action="store_true")
+    participant_update_parser.add_argument(
+        "--principal", action=argparse.BooleanOptionalAction, default=None
+    )
+
+    participant_remove_parser = participant_commands.add_parser("remove")
+    participant_remove_parser.add_argument("--id", required=True, dest="participant_id")
+
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     validate = commands.add_parser("validate")
@@ -555,6 +695,28 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.locator,
                 arguments.dry_run,
             )
+        if arguments.command == "participant" and arguments.participant_command == "list":
+            return participant_list(arguments.project, arguments.as_json)
+        if arguments.command == "participant" and arguments.participant_command == "add":
+            return participant_add(
+                arguments.project,
+                arguments.participant_id,
+                arguments.display_name,
+                arguments.role,
+                arguments.principal,
+            )
+        if arguments.command == "participant" and arguments.participant_command == "update":
+            return participant_update(
+                arguments.project,
+                arguments.participant_id,
+                arguments.display_name,
+                arguments.clear_display_name,
+                arguments.role,
+                arguments.clear_role,
+                arguments.principal,
+            )
+        if arguments.command == "participant" and arguments.participant_command == "remove":
+            return participant_remove(arguments.project, arguments.participant_id)
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":
