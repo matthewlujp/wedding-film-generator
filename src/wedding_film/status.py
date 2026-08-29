@@ -527,7 +527,8 @@ def _expected_storyboard_frames(storyboard: Path) -> int | None:
     return cast(int, document["total_frames"])
 
 
-def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> bool:
+def probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> bool:
+    """Check artifact against the fixed Rough Cut delivery contract via ffprobe."""
     try:
         result = subprocess.run(
             [
@@ -630,7 +631,7 @@ def _rough_cut_fact(
         )
     expected_frames = _expected_storyboard_frames(storyboard_path)
     ffprobe_path = ffprobe["artifacts"][0]
-    if expected_frames is None or not _probe_rough_cut(ffprobe_path, artifact, expected_frames):
+    if expected_frames is None or not probe_rough_cut(ffprobe_path, artifact, expected_frames):
         return _fact(
             "invalid",
             "ROUGH_CUT_INVALID_MEDIA",

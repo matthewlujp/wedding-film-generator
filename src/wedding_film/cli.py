@@ -14,6 +14,7 @@ import yaml
 
 from wedding_film.catalog import CatalogProblem, scan_catalog
 from wedding_film.exif import extract_exif
+from wedding_film.render import RenderProblem, render_rough_cut
 from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
 from wedding_film.story import validate_story, write_story_validation
@@ -173,6 +174,30 @@ def analyze_batch(
     return PARTIAL_OR_BUDGET_STOP if (result.failed or result.budget_stopped) else SUCCESS
 
 
+def _emit_render(
+    workspace: Path, code: str, message: str, artifact: Path, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=render artifact={artifact} code={code} message={message}",
+        file=stream,
+    )
+
+
+def render(workspace: Path) -> int:
+    try:
+        result = render_rough_cut(workspace)
+    except RenderProblem as problem:
+        _emit_render(workspace, problem.code, problem.message, problem.artifact, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_render(
+        workspace,
+        "ROUGH_CUT_RENDERED",
+        f"rough-cut.mp4 rendered with {result.frame_count} frames",
+        result.artifact,
+    )
+    return SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -271,6 +296,9 @@ def build_parser() -> argparse.ArgumentParser:
     storyboard_validate = storyboard_commands.add_parser("validate")
     storyboard_validate.add_argument("--json", action="store_true", dest="as_json")
     storyboard_validate.add_argument("--strict", action="store_true")
+    render_parser = commands.add_parser("render")
+    render_commands = render_parser.add_subparsers(dest="render_command", required=True)
+    render_commands.add_parser("rough-cut")
     return parser
 
 
@@ -306,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             return write_storyboard_validation(
                 arguments.project, arguments.as_json, arguments.strict
             )
+        if arguments.command == "render" and arguments.render_command == "rough-cut":
+            return render(arguments.project)
         return INVALID_OR_PREFLIGHT
     except KeyboardInterrupt:
         return INTERRUPTED
