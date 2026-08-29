@@ -43,3 +43,5 @@ rendered, unused upstream objects, and material runtime deviation are warnings b
 errors in strict mode.
 Structural, reference-integrity, transition, cue-timeline, and frame-arithmetic failures always
 return exit code 1.
+
+See `docs/real-photo-acceptance.md` for the opt-in runbook covering a real photo set: the cost-approved pilot before scaling up, the ~5 minute/7,200 frame Storyboard target, and the required human inspection before accepting a Rough Cut.
