@@ -233,7 +233,9 @@ def generate_candidate(workspace: Path) -> StoryCandidate:
     except CatalogProblem as problem:
         raise _problem(problem.code, problem.message) from problem
     participants = _participant_context(workspace)
-    request = NarrativeRequest(catalog_summary=catalog_summary, participants=participants)
+    request = NarrativeRequest(
+        context={"catalog_summary": catalog_summary, "participants": participants}
+    )
     settings = AdapterSettings(
         model=config.narrative.model,
         prompt_version=config.narrative.prompt_version,

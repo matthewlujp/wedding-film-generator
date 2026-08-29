@@ -16,8 +16,9 @@ AdapterFailureCategory = Literal[
 
 @dataclass(frozen=True)
 class NarrativeRequest:
-    catalog_summary: list[dict[str, object]]
-    participants: list[dict[str, object]]
+    # JSON-serializable prompt payload; shape depends on the narrative task
+    # (Story generation vs. Script generation consume different upstream layers).
+    context: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,54 @@ _FIXTURE_ALTERNATE_CANDIDATE: dict[str, object] = {
     ],
 }
 
+_SCRIPT_FIXTURE_CANDIDATE: dict[str, object] = {
+    "title": "Fixture Wedding Script",
+    "blocks": [
+        {
+            "id": "opening-card",
+            "type": "card",
+            "story_moment": "getting-ready",
+            "body": "Their story begins here.",
+        },
+        {
+            "id": "ceremony-narration",
+            "type": "narration",
+            "story_moment": "joyful-ceremony",
+            "body": "Surrounded by family and friends, they share their vows.",
+        },
+        {
+            "id": "ceremony-caption",
+            "type": "caption",
+            "story_moment": "joyful-ceremony",
+            "body": "Forever begins today.",
+        },
+    ],
+}
+
+_SCRIPT_FIXTURE_ALTERNATE_CANDIDATE: dict[str, object] = {
+    "title": "Fixture Wedding Script, Revisited",
+    "blocks": [
+        {
+            "id": "opening-card",
+            "type": "card",
+            "story_moment": "getting-ready",
+            "body": "Their story begins here, with quiet hope.",
+        },
+        {
+            "id": "ceremony-narration",
+            "type": "narration",
+            "story_moment": "joyful-ceremony",
+            "body": "Surrounded by family and friends, they share their vows.",
+        },
+        {
+            "id": "reception-caption",
+            "type": "caption",
+            "story_moment": "joyful-ceremony",
+            "body": "The celebration begins.",
+        },
+    ],
+}
+
 
 class FakeNarrativeAdapter:
     """Deterministic offline contract fixture; it has no Catalog dependency."""
@@ -129,31 +178,11 @@ class FakeNarrativeAdapter:
                 usage={"input_tokens": 10},
                 provider_metadata={"fixture": model},
             )
-        if model == "fixture-alternate":
-            candidate: dict[str, object] = dict(_FIXTURE_ALTERNATE_CANDIDATE)
-        elif model == "fixture-invalid-empty-moments":
-            candidate = {**_FIXTURE_CANDIDATE, "moments": []}
-        elif model == "fixture-invalid-duplicate-id":
-            candidate = {
-                **_FIXTURE_CANDIDATE,
-                "moments": [
-                    {"id": "getting-ready", "prose": "First."},
-                    {"id": "getting-ready", "prose": "Second."},
-                ],
-            }
-        elif model == "fixture-invalid-bad-id":
-            candidate = {
-                **_FIXTURE_CANDIDATE,
-                "moments": [{"id": "Getting_Ready", "prose": "Bad id."}],
-            }
-        elif model == "fixture-invalid-empty-intent":
-            candidate = {**_FIXTURE_CANDIDATE, "intent": "   "}
-        elif model == "fixture-invalid-formatting-only-intent":
-            candidate = {**_FIXTURE_CANDIDATE, "intent": "***"}
-        elif model == "fixture-invalid-type":
-            candidate = {**_FIXTURE_CANDIDATE, "target_duration_seconds": "not-a-number"}
-        else:
-            candidate = dict(_FIXTURE_CANDIDATE)
+        candidate = (
+            self._script_candidate(model)
+            if "blocks" in schema.fields
+            else self._story_candidate(model)
+        )
         return AdapterSuccess(
             outcome="success",
             adapter_version=self.version,
@@ -161,6 +190,105 @@ class FakeNarrativeAdapter:
             usage={"input_tokens": 120, "output_tokens": 80},
             provider_metadata={"fixture": model},
         )
+
+    def _story_candidate(self, model: str) -> dict[str, object]:
+        if model == "fixture-alternate":
+            return dict(_FIXTURE_ALTERNATE_CANDIDATE)
+        if model == "fixture-invalid-empty-moments":
+            return {**_FIXTURE_CANDIDATE, "moments": []}
+        if model == "fixture-invalid-duplicate-id":
+            return {
+                **_FIXTURE_CANDIDATE,
+                "moments": [
+                    {"id": "getting-ready", "prose": "First."},
+                    {"id": "getting-ready", "prose": "Second."},
+                ],
+            }
+        if model == "fixture-invalid-bad-id":
+            return {
+                **_FIXTURE_CANDIDATE,
+                "moments": [{"id": "Getting_Ready", "prose": "Bad id."}],
+            }
+        if model == "fixture-invalid-empty-intent":
+            return {**_FIXTURE_CANDIDATE, "intent": "   "}
+        if model == "fixture-invalid-formatting-only-intent":
+            return {**_FIXTURE_CANDIDATE, "intent": "***"}
+        if model == "fixture-invalid-type":
+            return {**_FIXTURE_CANDIDATE, "target_duration_seconds": "not-a-number"}
+        return dict(_FIXTURE_CANDIDATE)
+
+    def _script_candidate(self, model: str) -> dict[str, object]:
+        if model == "fixture-alternate":
+            return dict(_SCRIPT_FIXTURE_ALTERNATE_CANDIDATE)
+        if model == "fixture-invalid-empty-blocks":
+            return {**_SCRIPT_FIXTURE_CANDIDATE, "blocks": []}
+        if model == "fixture-invalid-duplicate-id":
+            return {
+                **_SCRIPT_FIXTURE_CANDIDATE,
+                "blocks": [
+                    {
+                        "id": "opening-card",
+                        "type": "card",
+                        "story_moment": "getting-ready",
+                        "body": "First.",
+                    },
+                    {
+                        "id": "opening-card",
+                        "type": "caption",
+                        "story_moment": "getting-ready",
+                        "body": "Second.",
+                    },
+                ],
+            }
+        if model == "fixture-invalid-bad-id":
+            return {
+                **_SCRIPT_FIXTURE_CANDIDATE,
+                "blocks": [
+                    {
+                        "id": "Opening_Card",
+                        "type": "card",
+                        "story_moment": "getting-ready",
+                        "body": "Bad id.",
+                    }
+                ],
+            }
+        if model == "fixture-invalid-block-type":
+            return {
+                **_SCRIPT_FIXTURE_CANDIDATE,
+                "blocks": [
+                    {
+                        "id": "opening-card",
+                        "type": "quote",
+                        "story_moment": "getting-ready",
+                        "body": "Bad type.",
+                    }
+                ],
+            }
+        if model == "fixture-invalid-empty-body":
+            return {
+                **_SCRIPT_FIXTURE_CANDIDATE,
+                "blocks": [
+                    {
+                        "id": "opening-card",
+                        "type": "card",
+                        "story_moment": "getting-ready",
+                        "body": "   ",
+                    }
+                ],
+            }
+        if model == "fixture-invalid-rich-body":
+            return {
+                **_SCRIPT_FIXTURE_CANDIDATE,
+                "blocks": [
+                    {
+                        "id": "opening-card",
+                        "type": "card",
+                        "story_moment": "getting-ready",
+                        "body": "**bold**",
+                    }
+                ],
+            }
+        return dict(_SCRIPT_FIXTURE_CANDIDATE)
 
 
 def narrative_adapter_for(name: str) -> NarrativeAdapter:
