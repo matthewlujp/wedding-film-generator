@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
+
+SLOW_FIXTURE_SECONDS = 0.15
 
 AdapterFailureCategory = Literal[
     "refusal",
@@ -82,13 +86,16 @@ class FakeVisionAdapter:
     provider = "deterministic-fake"
     version = "1"
 
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._flaky_attempts: dict[str, int] = {}
+
     def analyze(
         self,
         derivative: AnalysisDerivative,
         schema: OutputSchema,
         settings: AdapterSettings,
     ) -> AdapterResult:
-        del derivative
         if not _supports_candidate_schema(schema):
             return AdapterFailure(
                 outcome="failure",
@@ -127,6 +134,32 @@ class FakeVisionAdapter:
             )
         if model == "fixture-interrupt":
             raise KeyboardInterrupt
+        if model == "fixture-rate-limited":
+            return AdapterFailure(
+                outcome="failure",
+                adapter_version=self.version,
+                category="rate_limited",
+                retryable=True,
+                message="fixture rate limit exceeded",
+                usage={"input_images": 1},
+                provider_metadata={"fixture": model, "retry_after_seconds": 0},
+            )
+        if model == "fixture-flaky":
+            with self._lock:
+                attempt = self._flaky_attempts.get(derivative.sha256, 0) + 1
+                self._flaky_attempts[derivative.sha256] = attempt
+            if attempt < 3:
+                return AdapterFailure(
+                    outcome="failure",
+                    adapter_version=self.version,
+                    category="provider_unavailable",
+                    retryable=True,
+                    message="fixture provider is temporarily unavailable",
+                    usage={"input_images": 1},
+                    provider_metadata={"fixture": model, "attempt": attempt},
+                )
+        if model == "fixture-slow":
+            time.sleep(SLOW_FIXTURE_SECONDS)
         if model == "fixture-incomplete":
             candidate.pop("setting")
         elif model == "fixture-invalid-enum":

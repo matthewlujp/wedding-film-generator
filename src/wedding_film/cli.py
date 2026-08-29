@@ -18,7 +18,7 @@ from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
 from wedding_film.story import validate_story, write_story_validation
 from wedding_film.storyboard import write_storyboard_validation
-from wedding_film.vision import analyze_asset
+from wedding_film.vision import analyze_asset, run_batch, select_batch
 from wedding_film.workspace import unsafe_destination_reason
 
 SUCCESS = 0
@@ -128,6 +128,51 @@ def analyze(workspace: Path, asset_id: str) -> int:
     return SUCCESS
 
 
+def analyze_batch(
+    workspace: Path,
+    asset_ids: list[str],
+    dry_run: bool,
+    max_assets: int | None,
+    max_estimated_usd: float | None,
+    concurrency: int | None,
+) -> int:
+    ids = asset_ids or None
+    try:
+        if dry_run:
+            plan = select_batch(
+                workspace,
+                ids,
+                max_assets=max_assets,
+                max_estimated_usd=max_estimated_usd,
+                concurrency=concurrency,
+            )
+            _emit_catalog(
+                workspace,
+                "VISION_BATCH_PLAN",
+                f"selected={plan.target_count} estimated_cost_usd={plan.estimated_cost_usd:.2f} "
+                f"max_assets={plan.max_assets} max_estimated_usd={plan.max_estimated_usd:.2f} "
+                f"concurrency={plan.concurrency} asset_ids={','.join(plan.asset_ids)}",
+            )
+            return SUCCESS
+        result = run_batch(
+            workspace,
+            ids,
+            max_assets=max_assets,
+            max_estimated_usd=max_estimated_usd,
+            concurrency=concurrency,
+        )
+    except CatalogProblem as problem:
+        _emit_catalog(workspace, problem.code, problem.message, stream=sys.stderr)
+        return INVALID_OR_PREFLIGHT
+    _emit_catalog(
+        workspace,
+        "VISION_BATCH_COMPLETED",
+        f"succeeded={result.succeeded} reused={result.reused} "
+        f"failed={result.failed} budget_stopped={result.budget_stopped}",
+    )
+    return PARTIAL_OR_BUDGET_STOP if (result.failed or result.budget_stopped) else SUCCESS
+
+
 def initialize(workspace: Path) -> int:
     reason = unsafe_destination_reason(workspace)
     if reason is not None:
@@ -201,6 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_commands.add_parser("extract")
     analyze_parser = catalog_commands.add_parser("analyze")
     analyze_parser.add_argument("--asset-id", required=True)
+    analyze_batch_parser = catalog_commands.add_parser("analyze-batch")
+    analyze_batch_parser.add_argument("--asset-id", action="append", default=[])
+    analyze_batch_parser.add_argument("--dry-run", action="store_true")
+    analyze_batch_parser.add_argument("--max-assets", type=int, default=None)
+    analyze_batch_parser.add_argument("--max-estimated-usd", type=float, default=None)
+    analyze_batch_parser.add_argument("--concurrency", type=int, default=None)
     status = commands.add_parser("status")
     status.add_argument("--json", action="store_true", dest="as_json")
     validate = commands.add_parser("validate")
@@ -234,6 +285,15 @@ def main(argv: list[str] | None = None) -> int:
             return extract(arguments.project)
         if arguments.command == "catalog" and arguments.catalog_command == "analyze":
             return analyze(arguments.project, arguments.asset_id)
+        if arguments.command == "catalog" and arguments.catalog_command == "analyze-batch":
+            return analyze_batch(
+                arguments.project,
+                arguments.asset_id,
+                arguments.dry_run,
+                arguments.max_assets,
+                arguments.max_estimated_usd,
+                arguments.concurrency,
+            )
         if arguments.command == "status":
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":
