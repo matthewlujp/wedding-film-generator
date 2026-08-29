@@ -24,6 +24,8 @@ BACKGROUND_BLUR_SIGMA = 30
 BACKGROUND_DARKEN_ALPHA = 0.45
 CARD_PLACEHOLDER_COLOR = (24, 24, 32)
 ENCODE_TIMEOUT_SECONDS = 120
+ZOOM_MIN_SCALE = 0.95
+ZOOM_MAX_SCALE = 1.0
 
 _ORIENTATION_TRANSPOSE = {
     2: Image.Transpose.FLIP_LEFT_RIGHT,
@@ -59,6 +61,7 @@ class _ResolvedItem:
     duration_frames: int
     source: Path | None
     orientation: int
+    motion: str
 
 
 def _cover_fit(image: Image.Image, width: int, height: int) -> Image.Image:
@@ -70,10 +73,21 @@ def _cover_fit(image: Image.Image, width: int, height: int) -> Image.Image:
     return resized.crop((left, top, left + width, top + height))
 
 
-def _contain_fit(image: Image.Image, width: int, height: int) -> Image.Image:
-    scale = min(width / image.width, height / image.height)
-    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+def _contain_fit(image: Image.Image, width: int, height: int, scale: float = 1.0) -> Image.Image:
+    fit = min(width / image.width, height / image.height) * scale
+    size = (max(1, round(image.width * fit)), max(1, round(image.height * fit)))
     return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def _motion_scales(motion: str, duration_frames: int) -> list[float]:
+    """Linear, endpoint-exact scale ramp: 95%->100% zoom-in, reversed for zoom-out."""
+    if duration_frames <= 1 or motion == "static":
+        return [1.0] * duration_frames
+    span = ZOOM_MAX_SCALE - ZOOM_MIN_SCALE
+    positions = [index / (duration_frames - 1) for index in range(duration_frames)]
+    if motion == "slow-zoom-in":
+        return [ZOOM_MIN_SCALE + span * position for position in positions]
+    return [ZOOM_MAX_SCALE - span * position for position in positions]
 
 
 def _decode_source(source: Path, orientation: int) -> Image.Image:
@@ -95,17 +109,20 @@ def _decode_source(source: Path, orientation: int) -> Image.Image:
     return image if transpose is None else image.transpose(transpose)
 
 
-def _photo_frame(source: Path, orientation: int) -> Image.Image:
-    image = _decode_source(source, orientation)
+def _photo_background(image: Image.Image) -> Image.Image:
     background = _cover_fit(image, WIDTH, HEIGHT)
     background = background.filter(ImageFilter.GaussianBlur(BACKGROUND_BLUR_SIGMA))
     black = Image.new("RGB", (WIDTH, HEIGHT), (0, 0, 0))
-    background = Image.blend(background, black, BACKGROUND_DARKEN_ALPHA)
-    foreground = _contain_fit(image, WIDTH, HEIGHT)
+    return Image.blend(background, black, BACKGROUND_DARKEN_ALPHA)
+
+
+def _compose_photo_frame(image: Image.Image, background: Image.Image, scale: float) -> Image.Image:
+    foreground = _contain_fit(image, WIDTH, HEIGHT, scale)
+    frame = background.copy()
     left = (WIDTH - foreground.width) // 2
     top = (HEIGHT - foreground.height) // 2
-    background.paste(foreground, (left, top))
-    return background
+    frame.paste(foreground, (left, top))
+    return frame
 
 
 def _card_frame() -> Image.Image:
@@ -160,20 +177,18 @@ def _preflight_scope(document: dict[str, Any], storyboard_path: Path) -> None:
             storyboard_path,
             f"render only supports {WIDTH}x{HEIGHT}@{FPS}fps output",
         )
-    for item in document["sequence"]:
+
+
+def _sequence_transitions(document: dict[str, Any]) -> list[tuple[str, int | None]]:
+    """Transition[i] describes how sequence[i] joins into sequence[i + 1]."""
+    transitions: list[tuple[str, int | None]] = []
+    for item in document["sequence"][:-1]:
         transition = item.get("transition")
-        if transition is not None and transition["type"] != "cut":
-            raise _problem(
-                "RENDER_TRANSITION_UNSUPPORTED",
-                storyboard_path,
-                f"transition type {transition['type']} is not supported by this render",
-            )
-        if item["type"] == "photo" and item["motion"] != "static":
-            raise _problem(
-                "RENDER_MOTION_UNSUPPORTED",
-                storyboard_path,
-                f"motion {item['motion']} is not supported by this render",
-            )
+        if transition is None or transition["type"] == "cut":
+            transitions.append(("cut", None))
+        else:
+            transitions.append(("crossfade", cast(int, transition["duration_frames"])))
+    return transitions
 
 
 def _resolve_items(
@@ -190,7 +205,10 @@ def _resolve_items(
         if item["type"] == "card":
             resolved.append(
                 _ResolvedItem(
-                    duration_frames=cast(int, item["duration_frames"]), source=None, orientation=1
+                    duration_frames=cast(int, item["duration_frames"]),
+                    source=None,
+                    orientation=1,
+                    motion="static",
                 )
             )
             continue
@@ -210,12 +228,13 @@ def _resolve_items(
                 duration_frames=cast(int, item["duration_frames"]),
                 source=source,
                 orientation=orientation,
+                motion=cast(str, item["motion"]),
             )
         )
     return resolved
 
 
-def _encode_segment(
+def _encode_static_segment(
     ffmpeg: str, frame: Path, duration_frames: int, segment: Path, storyboard_path: Path
 ) -> None:
     _run_ffmpeg(
@@ -248,25 +267,97 @@ def _encode_segment(
     )
 
 
-def _concat_segments(
-    ffmpeg: str, segments: list[Path], staging: Path, candidate: Path, storyboard_path: Path
+def _encode_motion_segment(
+    ffmpeg: str,
+    frame_dir: Path,
+    image: Image.Image,
+    background: Image.Image,
+    motion: str,
+    duration_frames: int,
+    segment: Path,
+    storyboard_path: Path,
 ) -> None:
-    list_path = staging / "segments.txt"
-    list_path.write_text(
-        "".join(f"file '{segment.as_posix()}'\n" for segment in segments), encoding="utf-8"
-    )
+    frame_dir.mkdir()
+    for frame_index, scale in enumerate(_motion_scales(motion, duration_frames)):
+        frame = _compose_photo_frame(image, background, scale)
+        frame.save(frame_dir / f"frame-{frame_index:04d}.png")
     _run_ffmpeg(
         [
             ffmpeg,
             "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
+            "-framerate",
+            str(FPS),
             "-i",
-            str(list_path),
-            "-c",
-            "copy",
+            str(frame_dir / "frame-%04d.png"),
+            "-frames:v",
+            str(duration_frames),
+            "-vf",
+            "setsar=1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-an",
+            str(segment),
+        ],
+        storyboard_path,
+        "RENDER_ENCODE_FAILED",
+    )
+
+
+def _join_segments(
+    ffmpeg: str,
+    segments: list[Path],
+    frame_counts: list[int],
+    transitions: list[tuple[str, int | None]],
+    candidate: Path,
+    storyboard_path: Path,
+) -> None:
+    inputs: list[str] = []
+    for segment in segments:
+        inputs += ["-i", str(segment)]
+
+    filters = [
+        f"[{index}:v]fps={FPS},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[n{index}]"
+        for index in range(len(segments))
+    ]
+
+    current_label = "n0"
+    current_frames = frame_counts[0]
+    for index in range(1, len(segments)):
+        transition_type, crossfade_frames = transitions[index - 1]
+        next_label = f"j{index}"
+        if transition_type == "crossfade":
+            crossfade_frames = cast(int, crossfade_frames)
+            offset = (current_frames - crossfade_frames) / FPS
+            duration = crossfade_frames / FPS
+            filters.append(
+                f"[{current_label}][n{index}]xfade=transition=fade:"
+                f"duration={duration:.9f}:offset={offset:.9f}[{next_label}]"
+            )
+            current_frames += frame_counts[index] - crossfade_frames
+        else:
+            filters.append(f"[{current_label}][n{index}]concat=n=2:v=1:a=0[{next_label}]")
+            current_frames += frame_counts[index]
+        current_label = next_label
+
+    _run_ffmpeg(
+        [
+            ffmpeg,
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            f"[{current_label}]",
+            "-r",
+            str(FPS),
+            "-pix_fmt",
+            "yuv420p",
             "-an",
             "-movflags",
             "+faststart",
@@ -301,7 +392,8 @@ def render_rough_cut(workspace: Path) -> RenderResult:
         )
 
     resolved_items = _resolve_items(document, catalog_path, workspace)
-    expected_frames = sum(item.duration_frames for item in resolved_items)
+    expected_frames = cast(int, document["total_frames"])
+    transitions = _sequence_transitions(document)
 
     candidates_dir = workspace / ".work" / "candidates"
     if candidates_dir.is_symlink() or not candidates_dir.is_dir():
@@ -316,15 +408,59 @@ def render_rough_cut(workspace: Path) -> RenderResult:
     staging = Path(tempfile.mkdtemp(prefix=f".rough-cut.{uuid.uuid4().hex}.", dir=candidates_dir))
     try:
         segments: list[Path] = []
+        frame_counts: list[int] = []
         for index, item in enumerate(resolved_items):
-            frame_path = staging / f"frame-{index:04d}.png"
-            frame = _photo_frame(item.source, item.orientation) if item.source else _card_frame()
-            frame.save(frame_path)
+            frame_counts.append(item.duration_frames)
             segment_path = staging / f"segment-{index:04d}.mp4"
-            _encode_segment(ffmpeg, frame_path, item.duration_frames, segment_path, storyboard_path)
+            if item.source is None:
+                frame_path = staging / f"frame-{index:04d}.png"
+                _card_frame().save(frame_path)
+                _encode_static_segment(
+                    ffmpeg, frame_path, item.duration_frames, segment_path, storyboard_path
+                )
+            elif item.motion == "static":
+                image = _decode_source(item.source, item.orientation)
+                frame_path = staging / f"frame-{index:04d}.png"
+                _compose_photo_frame(image, _photo_background(image), 1.0).save(frame_path)
+                _encode_static_segment(
+                    ffmpeg, frame_path, item.duration_frames, segment_path, storyboard_path
+                )
+            else:
+                image = _decode_source(item.source, item.orientation)
+                background = _photo_background(image)
+                _encode_motion_segment(
+                    ffmpeg,
+                    staging / f"frames-{index:04d}",
+                    image,
+                    background,
+                    item.motion,
+                    item.duration_frames,
+                    segment_path,
+                    storyboard_path,
+                )
             segments.append(segment_path)
 
-        _concat_segments(ffmpeg, segments, staging, candidate, storyboard_path)
+        if len(segments) == 1:
+            _run_ffmpeg(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(segments[0]),
+                    "-c",
+                    "copy",
+                    "-an",
+                    "-movflags",
+                    "+faststart",
+                    "-f",
+                    "mp4",
+                    str(candidate),
+                ],
+                storyboard_path,
+                "RENDER_CONCAT_FAILED",
+            )
+        else:
+            _join_segments(ffmpeg, segments, frame_counts, transitions, candidate, storyboard_path)
 
         if not probe_rough_cut(ffprobe, candidate, expected_frames):
             raise _problem(
