@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 AdapterFailureCategory = Literal[
     "refusal",
@@ -144,6 +144,10 @@ _SCRIPT_FIXTURE_ALTERNATE_CANDIDATE: dict[str, object] = {
     ],
 }
 
+_STORYBOARD_CARD_DURATION_FRAMES = 24
+_STORYBOARD_PHOTO_DURATION_FRAMES = 48
+_STORYBOARD_MOTIONS = ("static", "slow-zoom-in", "slow-zoom-out")
+
 
 class FakeNarrativeAdapter:
     """Deterministic offline contract fixture; it has no Catalog dependency."""
@@ -178,11 +182,12 @@ class FakeNarrativeAdapter:
                 usage={"input_tokens": 10},
                 provider_metadata={"fixture": model},
             )
-        candidate = (
-            self._script_candidate(model)
-            if "blocks" in schema.fields
-            else self._story_candidate(model)
-        )
+        if "sequence" in schema.fields:
+            candidate: dict[str, object] = self._storyboard_candidate(model, request.context)
+        elif "blocks" in schema.fields:
+            candidate = self._script_candidate(model)
+        else:
+            candidate = self._story_candidate(model)
         return AdapterSuccess(
             outcome="success",
             adapter_version=self.version,
@@ -289,6 +294,107 @@ class FakeNarrativeAdapter:
                 ],
             }
         return dict(_SCRIPT_FIXTURE_CANDIDATE)
+
+    def _storyboard_candidate(self, model: str, context: dict[str, object]) -> dict[str, object]:
+        story = context.get("story")
+        script = context.get("script")
+        assets = context.get("assets")
+        moments = (
+            cast("list[str]", cast(dict[str, Any], story)["moments"])
+            if isinstance(story, dict)
+            else []
+        )
+        blocks = (
+            cast("list[dict[str, Any]]", cast(dict[str, Any], script)["blocks"])
+            if isinstance(script, dict)
+            else []
+        )
+        asset_entries = cast("list[dict[str, Any]]", assets) if isinstance(assets, list) else []
+
+        card_blocks = [block for block in blocks if block.get("type") == "card"]
+        caption_by_moment = {
+            block["story_moment"]: block["id"] for block in blocks if block.get("type") == "caption"
+        }
+        narration_blocks = [block for block in blocks if block.get("type") == "narration"]
+
+        card_duration = _STORYBOARD_CARD_DURATION_FRAMES
+        motion_offset = 0
+        if model == "fixture-alternate":
+            card_duration = _STORYBOARD_CARD_DURATION_FRAMES * 2
+            motion_offset = 1
+
+        sequence: list[dict[str, object]] = []
+        for block in card_blocks:
+            sequence.append(
+                {
+                    "item_id": f"card-{block['id']}",
+                    "type": "card",
+                    "story_moment": block["story_moment"],
+                    "duration_frames": card_duration,
+                    "script_block": block["id"],
+                    "transition": {"type": "cut"},
+                }
+            )
+        for index, asset in enumerate(asset_entries):
+            moment_id = moments[index % len(moments)] if moments else "unknown-moment"
+            item: dict[str, object] = {
+                "item_id": f"photo-{index}",
+                "type": "photo",
+                "story_moment": moment_id,
+                "duration_frames": _STORYBOARD_PHOTO_DURATION_FRAMES,
+                "asset_id": asset["asset_id"],
+                "motion": _STORYBOARD_MOTIONS[(index + motion_offset) % len(_STORYBOARD_MOTIONS)],
+            }
+            caption_block_id = caption_by_moment.pop(moment_id, None)
+            if caption_block_id is not None:
+                item["script_block"] = caption_block_id
+            if index != len(asset_entries) - 1:
+                item["transition"] = {"type": "cut"}
+            sequence.append(item)
+
+        if model == "fixture-invalid-empty-sequence":
+            sequence = []
+        elif model == "fixture-invalid-duplicate-item-id" and len(sequence) >= 2:
+            sequence[1]["item_id"] = sequence[0]["item_id"]
+        elif model == "fixture-invalid-unknown-asset" and sequence:
+            for item in sequence:
+                if item["type"] == "photo":
+                    item["asset_id"] = "sha256:" + "0" * 64
+                    break
+        elif model == "fixture-invalid-unknown-story-moment" and sequence:
+            sequence[0]["story_moment"] = "no-such-moment"
+        elif model == "fixture-invalid-bad-transition" and len(sequence) >= 2:
+            sequence[0]["transition"] = {"type": "crossfade", "duration_frames": 10_000}
+
+        candidate: dict[str, object] = {"sequence": sequence}
+        total_frames = sum(cast(int, item["duration_frames"]) for item in sequence)
+        if narration_blocks and total_frames:
+            count = len(narration_blocks)
+            share = total_frames // count
+            cues: list[dict[str, object]] = []
+            start = 0
+            for index, block in enumerate(narration_blocks):
+                length = total_frames - start if index == count - 1 else share
+                cues.append(
+                    {
+                        "cue_id": f"narration-{block['id']}",
+                        "block_id": block["id"],
+                        "start_frame": start,
+                        "duration_frames": length,
+                    }
+                )
+                start += length
+            candidate["narration_cues"] = cues
+        if total_frames:
+            candidate["music_cues"] = [
+                {
+                    "cue_id": "music-intent",
+                    "start_frame": 0,
+                    "duration_frames": total_frames,
+                    "intent": "warm acoustic guitar",
+                }
+            ]
+        return candidate
 
 
 def narrative_adapter_for(name: str) -> NarrativeAdapter:
