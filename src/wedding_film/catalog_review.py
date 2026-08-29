@@ -14,6 +14,7 @@ from wedding_film.catalog import (
     checkpoint_catalog,
     load_catalog,
 )
+from wedding_film.participants import ParticipantProblem, load_participants
 from wedding_film.storyboard import parse_storyboard
 
 
@@ -179,6 +180,22 @@ def resolve_selection(
     return [selected[asset_id] for asset_id in sorted(selected)]
 
 
+def _validate_subject_attribution_participants(workspace: Path, value: Any) -> None:
+    """Every Participant ID a Subject Attribution set names must exist in the roster."""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return
+    try:
+        known_ids = {participant.id for participant in load_participants(workspace)}
+    except ParticipantProblem as problem:
+        raise _problem(problem.code, problem.message) from problem
+    missing = sorted(set(value) - known_ids)
+    if missing:
+        raise _problem(
+            "CATALOG_PARTICIPANT_NOT_FOUND",
+            f"Subject Attribution references unknown Participant {missing[0]!r}",
+        )
+
+
 @dataclass(frozen=True)
 class CorrectionResult:
     resolved_count: int
@@ -205,6 +222,8 @@ def apply_correction(
         )
     if not actor.strip():
         raise _problem("CATALOG_CORRECTION_INVALID", "Correction actor must be non-empty")
+    if target == "/subject_attributions" and op == "set":
+        _validate_subject_attribution_participants(workspace, value)
     records = load_catalog(workspace)
     selected = resolve_selection(records, asset_ids, locator_globs)
 
