@@ -70,6 +70,7 @@ class VisionAdapter(Protocol):
     name: str
     provider: str
     version: str
+    default_parameters: dict[str, object]
 
     def analyze(
         self,
@@ -85,6 +86,7 @@ class FakeVisionAdapter:
     name = "fake"
     provider = "deterministic-fake"
     version = "1"
+    default_parameters: dict[str, object] = {}
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -214,4 +216,8 @@ def _supports_candidate_schema(schema: OutputSchema) -> bool:
 def adapter_for(name: str) -> VisionAdapter:
     if name == "fake":
         return FakeVisionAdapter()
+    if name == "openai":
+        from wedding_film.openai_adapter import OpenAIVisionAdapter
+
+        return OpenAIVisionAdapter()
     raise ValueError(f"vision adapter {name!r} cannot analyze assets")
