@@ -35,3 +35,11 @@ candidates leave the Semantic Catalog unchanged. Identical successful contracts 
 Real Project Workspaces under `projects/` are ignored by Git. Keep private workspaces outside the repository or under that ignored directory.
 
 `status --json` is the machine-readable state interface. Plain status renders the same facts. Both derive state from the current workspace and process environment without a status database.
+
+Validate an authored Storyboard in isolation with `storyboard validate`; use top-level `validate`
+to require the complete Story → Script → Storyboard chain. Both commands accept `--json` and
+`--strict`. Storyboard editorial findings such as stale input hashes, narration/music work not yet
+rendered, unused upstream objects, and material runtime deviation are warnings by default and
+errors in strict mode.
+Structural, reference-integrity, transition, cue-timeline, and frame-arithmetic failures always
+return exit code 1.

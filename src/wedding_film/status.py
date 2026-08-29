@@ -9,8 +9,6 @@ import subprocess
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
-import yaml
-
 from wedding_film.adapters import required_credentials
 from wedding_film.catalog import CatalogProblem, inspect_materials, validate_catalog
 from wedding_film.config import (
@@ -20,6 +18,7 @@ from wedding_film.config import (
 )
 from wedding_film.script import validate_script
 from wedding_film.story import validate_story
+from wedding_film.storyboard import parse_storyboard, validate_storyboard
 from wedding_film.workspace import unsafe_destination_reason
 
 State = Literal["missing", "invalid", "stale", "ready", "complete-with-warnings"]
@@ -288,37 +287,6 @@ def _artifact_preflight(
     return None
 
 
-def _canonical_fact(
-    workspace: Path,
-    name: str,
-    filename: str,
-    dependencies: dict[str, tuple[Path, Fact]],
-) -> Fact:
-    artifact = workspace / filename
-    hashes, hash_error = _current_hashes(
-        {key: value[0] for key, value in dependencies.items()}, name.upper(), name
-    )
-    if hash_error is not None:
-        return hash_error
-    preflight = _artifact_preflight(
-        artifact,
-        name.upper(),
-        name,
-        {key: value[1] for key, value in dependencies.items()},
-        hashes,
-    )
-    if preflight is not None:
-        return preflight
-    return _fact(
-        "invalid",
-        f"{name.upper()}_VALIDATOR_UNAVAILABLE",
-        f"{filename} cannot be ready until its owning validation slice is installed",
-        [str(artifact)],
-        phase=name,
-        upstream_hashes=hashes,
-    )
-
-
 def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
     catalog = workspace / "catalog.jsonl"
     manifest = None
@@ -474,19 +442,89 @@ def _script_fact(workspace: Path, story_path: Path, story: Fact) -> Fact:
     )
 
 
+def _storyboard_fact(
+    workspace: Path,
+    catalog_path: Path,
+    catalog: Fact,
+    story_path: Path,
+    story: Fact,
+    script_path: Path,
+    script: Fact,
+) -> Fact:
+    artifact = workspace / "storyboard.yaml"
+    dependencies = {
+        "semantic_catalog": (catalog_path, catalog),
+        "story": (story_path, story),
+        "script": (script_path, script),
+    }
+    hashes, hash_error = _current_hashes(
+        {name: value[0] for name, value in dependencies.items()},
+        "STORYBOARD",
+        "storyboard",
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact,
+        "STORYBOARD",
+        "storyboard",
+        {name: value[1] for name, value in dependencies.items()},
+        hashes,
+    )
+    if preflight is not None:
+        if preflight["state"] != "missing":
+            preflight["next_commands"] = [_command(workspace, "storyboard validate")]
+        return preflight
+    _, diagnostics, validation_warnings = validate_storyboard(
+        artifact,
+        story_path,
+        script_path,
+        catalog_path,
+        workspace,
+        require_catalog_integrity=True,
+    )
+    if diagnostics:
+        problem = diagnostics[0]
+        return _fact(
+            "invalid",
+            problem["code"],
+            f"location={problem['location']} {problem['message']}",
+            [str(artifact)],
+            phase="storyboard",
+            upstream_hashes=hashes,
+            next_commands=[_command(workspace, "storyboard validate")],
+        )
+    warnings: list[StatusMessage] = [
+        {"code": warning["code"], "message": warning["message"]}
+        for warning in validation_warnings
+    ]
+    if warnings:
+        return _fact(
+            "complete-with-warnings",
+            "STORYBOARD_VALID_WITH_WARNINGS",
+            "storyboard.yaml is valid with editorial warnings",
+            [str(artifact)],
+            phase="storyboard",
+            upstream_hashes=hashes,
+            warnings=warnings,
+            next_commands=[_command(workspace, "storyboard validate")],
+        )
+    return _fact(
+        "ready",
+        "STORYBOARD_VALID",
+        "storyboard.yaml is structurally and cross-reference valid",
+        [str(artifact)],
+        phase="storyboard",
+        upstream_hashes=hashes,
+        next_commands=[_command(workspace, "storyboard validate")],
+    )
+
+
 def _expected_storyboard_frames(storyboard: Path) -> int | None:
-    try:
-        loaded = yaml.safe_load(storyboard.read_text(encoding="utf-8"))
-        sequence = loaded["sequence"]
-        total = 0
-        for item in sequence:
-            total += item["duration_frames"]
-            transition = item.get("transition")
-            if transition and transition.get("type") == "crossfade":
-                total -= transition["duration_frames"]
-    except (OSError, UnicodeError, TypeError, KeyError, yaml.YAMLError):
+    document, diagnostics = parse_storyboard(storyboard)
+    if diagnostics or document is None:
         return None
-    return total if type(total) is int and total > 0 else None
+    return cast(int, document["total_frames"])
 
 
 def _probe_rough_cut(executable: str, artifact: Path, expected_frames: int) -> bool:
@@ -628,15 +666,14 @@ def derive_status(workspace: Path) -> StatusPayload:
         {"semantic_catalog": (catalog_path, catalog)},
     )
     script = _script_fact(workspace, story_path, story)
-    storyboard = _canonical_fact(
+    storyboard = _storyboard_fact(
         workspace,
-        "storyboard",
-        "storyboard.yaml",
-        {
-            "semantic_catalog": (catalog_path, catalog),
-            "story": (story_path, story),
-            "script": (script_path, script),
-        },
+        catalog_path,
+        catalog,
+        story_path,
+        story,
+        script_path,
+        script,
     )
     rough_cut = _rough_cut_fact(workspace, storyboard_path, storyboard, ffmpeg, ffprobe)
     prerequisites = {
