@@ -36,6 +36,14 @@ from wedding_film.render import RenderProblem, render_rough_cut
 from wedding_film.script import validate_script, write_script_validation
 from wedding_film.status import write_status
 from wedding_film.story import validate_story, write_story_validation
+from wedding_film.story_generation import (
+    NarrativeProblem,
+    adopt_candidate,
+    diff_summary,
+    generate_candidate,
+    render_story_markdown,
+    write_candidate_file,
+)
 from wedding_film.storyboard import write_storyboard_validation
 from wedding_film.vision import analyze_asset, run_batch, select_batch
 from wedding_film.workspace import unsafe_destination_reason
@@ -536,6 +544,103 @@ def write_validation(workspace: Path, as_json: bool, strict: bool) -> int:
     )
 
 
+def _emit_narrative(
+    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=story artifact=story.md code={code} message={message}",
+        file=stream,
+    )
+
+
+def _report_narrative_problem(
+    workspace: Path,
+    problem: NarrativeProblem | CatalogProblem | ParticipantProblem,
+    as_json: bool,
+) -> int:
+    payload = {"state": "failed", "code": problem.code, "message": problem.message}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        _emit_narrative(workspace, problem.code, problem.message, stream=sys.stderr)
+    return INVALID_OR_PREFLIGHT
+
+
+def story_generate(workspace: Path, as_json: bool) -> int:
+    try:
+        candidate = generate_candidate(workspace)
+    except (NarrativeProblem, CatalogProblem, ParticipantProblem) as problem:
+        return _report_narrative_problem(workspace, problem, as_json)
+
+    markdown = render_story_markdown(candidate)
+    try:
+        candidate_path = write_candidate_file(workspace, markdown)
+    except NarrativeProblem as problem:
+        return _report_narrative_problem(workspace, problem, as_json)
+
+    diagnostics = validate_story(candidate_path)
+    story_path = workspace / "story.md"
+    existing = story_path.is_file() and not story_path.is_symlink()
+
+    if diagnostics:
+        payload = {
+            "state": "candidate-invalid",
+            "candidate": str(candidate_path),
+            "diagnostics": diagnostics,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"candidate={candidate_path} state=candidate-invalid")
+            for item in diagnostics:
+                print(
+                    f"  code={item['code']} location={item['location']} "
+                    f"message={item['message']}"
+                )
+        return INVALID_OR_PREFLIGHT
+
+    if existing:
+        differences = diff_summary(workspace, candidate)
+        payload = {
+            "state": "candidate-differs",
+            "candidate": str(candidate_path),
+            "story": str(story_path),
+            "differences": differences,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"candidate={candidate_path} state=candidate-differs story={story_path}")
+            if differences:
+                for line in differences:
+                    print(f"  difference: {line}")
+            else:
+                print("  difference: candidate is textually equivalent to story.md")
+            print(f"  next=wedding-film --project {workspace} story adopt --force")
+        return INVALID_OR_PREFLIGHT
+
+    payload = {"state": "candidate-ready", "candidate": str(candidate_path)}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"candidate={candidate_path} state=candidate-ready")
+        print(f"  next=wedding-film --project {workspace} story adopt")
+    return SUCCESS
+
+
+def story_adopt(workspace: Path, force: bool, as_json: bool) -> int:
+    try:
+        story_path = adopt_candidate(workspace, force=force)
+    except NarrativeProblem as problem:
+        return _report_narrative_problem(workspace, problem, as_json)
+    payload = {"state": "adopted", "story": str(story_path)}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"story={story_path} state=adopted")
+    return SUCCESS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = CliParser(prog="wedding-film")
     parser.add_argument("--project", type=Path, required=True, help="explicit Project Workspace")
@@ -623,6 +728,11 @@ def build_parser() -> argparse.ArgumentParser:
     story_commands = story.add_subparsers(dest="story_command", required=True)
     story_validate = story_commands.add_parser("validate")
     story_validate.add_argument("--json", action="store_true", dest="as_json")
+    story_generate_parser = story_commands.add_parser("generate")
+    story_generate_parser.add_argument("--json", action="store_true", dest="as_json")
+    story_adopt_parser = story_commands.add_parser("adopt")
+    story_adopt_parser.add_argument("--force", action="store_true")
+    story_adopt_parser.add_argument("--json", action="store_true", dest="as_json")
     script = commands.add_parser("script")
     script_commands = script.add_subparsers(dest="script_command", required=True)
     script_validate = script_commands.add_parser("validate")
@@ -723,6 +833,10 @@ def main(argv: list[str] | None = None) -> int:
             return write_validation(arguments.project, arguments.as_json, arguments.strict)
         if arguments.command == "story" and arguments.story_command == "validate":
             return write_story_validation(arguments.project, arguments.as_json)
+        if arguments.command == "story" and arguments.story_command == "generate":
+            return story_generate(arguments.project, arguments.as_json)
+        if arguments.command == "story" and arguments.story_command == "adopt":
+            return story_adopt(arguments.project, arguments.force, arguments.as_json)
         if arguments.command == "script" and arguments.script_command == "validate":
             return write_script_validation(arguments.project, arguments.as_json, arguments.strict)
         if arguments.command == "storyboard" and arguments.storyboard_command == "validate":
