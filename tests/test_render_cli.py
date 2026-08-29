@@ -75,6 +75,20 @@ def center_pixel(png_path: Path) -> tuple[int, int, int]:
     return image.getpixel((image.width // 2, image.height // 2))
 
 
+def text_rows(png_path: Path, x0: int, x1: int, y0: int, y1: int, *, threshold: int = 200) -> int:
+    """Count contiguous bands of near-white pixel rows within a region."""
+    region = Image.open(png_path).convert("L").crop((x0, y0, x1, y1))
+    bands = 0
+    previous = False
+    for y in range(region.height):
+        _, maximum = region.crop((0, y, region.width, y + 1)).getextrema()
+        found = maximum > threshold
+        if found and not previous:
+            bands += 1
+        previous = found
+    return bands
+
+
 def storyboard_yaml(
     story: str, script: str, catalog: str, asset_id: str, *, motion: str = "static",
     transition: str = "  - item_id: opening\n    type: card\n    story_moment: preparation\n"
@@ -157,6 +171,7 @@ def two_photo_workspace(
     duration_b: int = 10,
     orientation_b: int | None = None,
     crossfade_frames: int | None = None,
+    caption_on_first: bool = False,
 ) -> Path:
     workspace = tmp_path / "movie"
     assert run_cli("--project", str(workspace), "project", "init").returncode == 0
@@ -184,6 +199,7 @@ def two_photo_workspace(
         if crossfade_frames is None
         else f"    transition:\n      type: crossfade\n      duration_frames: {crossfade_frames}\n"
     )
+    caption_line = "    script_block: ceremony-caption\n" if caption_on_first else ""
     (workspace / "storyboard.yaml").write_text(
         f"""schema_version: 1
 output:
@@ -201,13 +217,86 @@ sequence:
     duration_frames: {duration_a}
     asset_id: {asset_a}
     motion: {motion_a}
-{transition}  - item_id: second
+{caption_line}{transition}  - item_id: second
     type: photo
     story_moment: ceremony
     duration_frames: {duration_b}
     asset_id: {asset_b}
     motion: {motion_b}
 """
+    )
+    return workspace
+
+
+def text_workspace(
+    tmp_path: Path,
+    *,
+    card_body: str,
+    caption_body: str | None = None,
+    photo_duration: int = 24,
+) -> Path:
+    workspace = tmp_path / "movie"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    materials.mkdir()
+    Image.new("RGB", (400, 300), (200, 100, 50)).save(materials / "photo.jpg")
+    assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    catalog = (workspace / "catalog.jsonl").read_text()
+    asset_id = json.loads(catalog)["asset_id"]
+    story = valid_story()
+    (workspace / "story.md").write_text(story)
+    caption_block = ""
+    caption_reference = ""
+    if caption_body is not None:
+        caption_block = f"""
+## ceremony-caption
+
+type: caption
+story_moment: ceremony
+
+{caption_body}
+"""
+        caption_reference = "    script_block: ceremony-caption\n"
+    script = f"""---
+schema_version: 1
+title: Test
+inputs:
+  story: {digest(story)}
+---
+
+## opening-card
+
+type: card
+story_moment: preparation
+
+{card_body}
+{caption_block}"""
+    (workspace / "script.md").write_text(script)
+    (workspace / "storyboard.yaml").write_text(
+        f"""schema_version: 1
+output:
+  width: 1920
+  height: 1080
+  fps: 24
+inputs:
+  story: {digest(story)}
+  script: {digest(script)}
+  catalog: {digest(catalog)}
+sequence:
+  - item_id: opening
+    type: card
+    story_moment: preparation
+    duration_frames: 6
+    script_block: opening-card
+    transition:
+      type: cut
+  - item_id: portrait
+    type: photo
+    story_moment: ceremony
+    duration_frames: {photo_duration}
+    asset_id: {asset_id}
+    motion: static
+{caption_reference}"""
     )
     return workspace
 
@@ -432,3 +521,127 @@ def test_render_reports_missing_ffmpeg_toolchain(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "RENDER_FFMPEG_MISSING" in result.stderr
     assert not (workspace / "renders" / "rough-cut.mp4").exists()
+
+
+def test_render_draws_card_and_caption_text_with_preserved_authored_breaks(
+    tmp_path: Path,
+) -> None:
+    workspace = text_workspace(
+        tmp_path,
+        card_body="ふたりの物語\nここから始まる",
+        caption_body="永遠のはじまり",
+    )
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 0, result.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    card_frame = tmp_path / "card.png"
+    caption_frame = tmp_path / "caption.png"
+    extract_frame(artifact, 3, card_frame)
+    extract_frame(artifact, 12, caption_frame)
+
+    assert text_rows(card_frame, 288, 1632, 162, 918) == 2
+    assert text_rows(caption_frame, 192, 1728, 700, 1000) >= 1
+
+
+def test_render_draws_latin_card_text(tmp_path: Path) -> None:
+    workspace = text_workspace(tmp_path, card_body="Our Story Begins Here")
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 0, result.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    card_frame = tmp_path / "card.png"
+    extract_frame(artifact, 3, card_frame)
+
+    assert text_rows(card_frame, 288, 1632, 162, 918) == 1
+
+
+def test_render_wraps_latin_caption_at_word_boundaries(tmp_path: Path) -> None:
+    workspace = text_workspace(
+        tmp_path,
+        card_body="Our Story",
+        caption_body=(
+            "We exchange our vows together forever and always in front of "
+            "everyone we love and hold dear"
+        ),
+    )
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 0, result.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    caption_frame = tmp_path / "caption.png"
+    extract_frame(artifact, 12, caption_frame)
+
+    assert text_rows(caption_frame, 192, 1728, 700, 1000) >= 2
+
+
+def test_render_wraps_japanese_text_at_character_boundaries(tmp_path: Path) -> None:
+    workspace = text_workspace(tmp_path, card_body="ふたりの物語" * 6)
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 0, result.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    card_frame = tmp_path / "card.png"
+    extract_frame(artifact, 3, card_frame)
+
+    assert text_rows(card_frame, 288, 1632, 162, 918) >= 2
+
+
+def test_render_rejects_card_text_overflowing_minimum_size_and_preserves_prior_rough_cut(
+    tmp_path: Path,
+) -> None:
+    workspace = text_workspace(tmp_path, card_body="Hello")
+    first = run_cli("--project", str(workspace), "render", "rough-cut")
+    assert first.returncode == 0, first.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+    prior_bytes = artifact.read_bytes()
+
+    overflow_body = "\n".join(f"line-{index}" for index in range(20))
+    script_path = workspace / "script.md"
+    script_path.write_text(script_path.read_text().replace("Hello", overflow_body))
+
+    second = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert second.returncode == 1
+    assert "RENDER_CARD_TEXT_OVERFLOW" in second.stderr
+    assert artifact.read_bytes() == prior_bytes
+    assert not any((workspace / ".work" / "candidates").iterdir())
+
+
+def test_render_rejects_text_with_glyphs_missing_from_bundled_font(tmp_path: Path) -> None:
+    workspace = text_workspace(tmp_path, card_body="Celebration \U0001F389")
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 1
+    assert "RENDER_TEXT_GLYPH_MISSING" in result.stderr
+    assert not (workspace / "renders" / "rough-cut.mp4").exists()
+    assert not any((workspace / ".work" / "candidates").iterdir())
+
+
+def test_render_caption_participates_in_crossfade(tmp_path: Path) -> None:
+    workspace = two_photo_workspace(tmp_path, crossfade_frames=4, caption_on_first=True)
+
+    result = run_cli("--project", str(workspace), "render", "rough-cut")
+
+    assert result.returncode == 0, result.stderr
+    artifact = workspace / "renders" / "rough-cut.mp4"
+
+    pure_first = tmp_path / "pure-first.png"
+    blended = tmp_path / "blended.png"
+    pure_second = tmp_path / "pure-second.png"
+    extract_frame(artifact, 0, pure_first)
+    extract_frame(artifact, 9, blended)
+    extract_frame(artifact, 17, pure_second)
+
+    band_point = (250, 950)
+    first_band = sum(Image.open(pure_first).convert("RGB").getpixel(band_point))
+    blended_band = sum(Image.open(blended).convert("RGB").getpixel(band_point))
+    second_band = sum(Image.open(pure_second).convert("RGB").getpixel(band_point))
+
+    assert first_band < second_band - 60
+    assert first_band < blended_band < second_band

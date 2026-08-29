@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local, inspectable wedding-film production pipeline"
 requires-python = ">=3.12"
 dependencies = [
+  "fonttools>=4.54,<5",
   "pillow>=11,<13",
   "PyYAML>=6.0.2,<7",
 ]
@@ -37,6 +38,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["wedding_film"]
+
+[[tool.mypy.overrides]]
+module = "fontTools.*"
+ignore_missing_imports = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wedding_film"]
