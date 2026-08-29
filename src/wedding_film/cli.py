@@ -13,7 +13,7 @@ from typing import Any, NoReturn, TextIO
 
 import yaml
 
-from wedding_film import script_generation
+from wedding_film import script_generation, storyboard_generation
 from wedding_film.catalog import CatalogProblem, JsonObject, load_catalog, scan_catalog
 from wedding_film.catalog_review import (
     apply_correction,
@@ -45,7 +45,7 @@ from wedding_film.story_generation import (
     render_story_markdown,
     write_candidate_file,
 )
-from wedding_film.storyboard import write_storyboard_validation
+from wedding_film.storyboard import validate_storyboard, write_storyboard_validation
 from wedding_film.vision import analyze_asset, run_batch, select_batch
 from wedding_film.workspace import unsafe_destination_reason
 
@@ -736,6 +736,118 @@ def script_adopt(workspace: Path, force: bool, as_json: bool) -> int:
     return SUCCESS
 
 
+def _emit_storyboard_narrative(
+    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=storyboard artifact=storyboard.yaml "
+        f"code={code} message={message}",
+        file=stream,
+    )
+
+
+def _report_storyboard_problem(workspace: Path, problem: NarrativeProblem, as_json: bool) -> int:
+    payload = {"state": "failed", "code": problem.code, "message": problem.message}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        _emit_storyboard_narrative(workspace, problem.code, problem.message, stream=sys.stderr)
+    return INVALID_OR_PREFLIGHT
+
+
+def storyboard_generate(workspace: Path, as_json: bool) -> int:
+    try:
+        candidate = storyboard_generation.generate_candidate(workspace)
+    except NarrativeProblem as problem:
+        return _report_storyboard_problem(workspace, problem, as_json)
+
+    document_text = storyboard_generation.render_storyboard_yaml(candidate)
+    try:
+        candidate_path = storyboard_generation.write_candidate_file(workspace, document_text)
+    except NarrativeProblem as problem:
+        return _report_storyboard_problem(workspace, problem, as_json)
+
+    story_path = workspace / "story.md"
+    script_path = workspace / "script.md"
+    catalog_path = workspace / "catalog.jsonl"
+    _, diagnostics, warnings = validate_storyboard(
+        candidate_path,
+        story_path,
+        script_path,
+        catalog_path,
+        workspace,
+        require_catalog_integrity=True,
+    )
+    storyboard_path = workspace / "storyboard.yaml"
+    existing = storyboard_path.is_file() and not storyboard_path.is_symlink()
+
+    if diagnostics:
+        payload = {
+            "state": "candidate-invalid",
+            "candidate": str(candidate_path),
+            "diagnostics": diagnostics,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"candidate={candidate_path} state=candidate-invalid")
+            for item in diagnostics:
+                print(
+                    f"  code={item['code']} location={item['location']} "
+                    f"message={item['message']}"
+                )
+        return INVALID_OR_PREFLIGHT
+
+    if existing:
+        differences = storyboard_generation.diff_summary(workspace, candidate)
+        payload = {
+            "state": "candidate-differs",
+            "candidate": str(candidate_path),
+            "storyboard": str(storyboard_path),
+            "differences": differences,
+            "warnings": warnings,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"candidate={candidate_path} state=candidate-differs storyboard={storyboard_path}"
+            )
+            if differences:
+                for line in differences:
+                    print(f"  difference: {line}")
+            else:
+                print("  difference: candidate is textually equivalent to storyboard.yaml")
+            print(f"  next=wedding-film --project {workspace} storyboard adopt --force")
+        return INVALID_OR_PREFLIGHT
+
+    payload = {"state": "candidate-ready", "candidate": str(candidate_path), "warnings": warnings}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"candidate={candidate_path} state=candidate-ready")
+        for warning in warnings:
+            print(
+                f"  warning={warning['code']} location={warning['location']} "
+                f"message={warning['message']}"
+            )
+        print(f"  next=wedding-film --project {workspace} storyboard adopt")
+    return SUCCESS
+
+
+def storyboard_adopt(workspace: Path, force: bool, as_json: bool) -> int:
+    try:
+        storyboard_path = storyboard_generation.adopt_candidate(workspace, force=force)
+    except NarrativeProblem as problem:
+        return _report_storyboard_problem(workspace, problem, as_json)
+    payload = {"state": "adopted", "storyboard": str(storyboard_path)}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"storyboard={storyboard_path} state=adopted")
+    return SUCCESS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = CliParser(prog="wedding-film")
     parser.add_argument("--project", type=Path, required=True, help="explicit Project Workspace")
@@ -843,6 +955,11 @@ def build_parser() -> argparse.ArgumentParser:
     storyboard_validate = storyboard_commands.add_parser("validate")
     storyboard_validate.add_argument("--json", action="store_true", dest="as_json")
     storyboard_validate.add_argument("--strict", action="store_true")
+    storyboard_generate_parser = storyboard_commands.add_parser("generate")
+    storyboard_generate_parser.add_argument("--json", action="store_true", dest="as_json")
+    storyboard_adopt_parser = storyboard_commands.add_parser("adopt")
+    storyboard_adopt_parser.add_argument("--force", action="store_true")
+    storyboard_adopt_parser.add_argument("--json", action="store_true", dest="as_json")
     render_parser = commands.add_parser("render")
     render_commands = render_parser.add_subparsers(dest="render_command", required=True)
     render_commands.add_parser("rough-cut")
@@ -947,6 +1064,10 @@ def main(argv: list[str] | None = None) -> int:
             return write_storyboard_validation(
                 arguments.project, arguments.as_json, arguments.strict
             )
+        if arguments.command == "storyboard" and arguments.storyboard_command == "generate":
+            return storyboard_generate(arguments.project, arguments.as_json)
+        if arguments.command == "storyboard" and arguments.storyboard_command == "adopt":
+            return storyboard_adopt(arguments.project, arguments.force, arguments.as_json)
         if arguments.command == "render" and arguments.render_command == "rough-cut":
             return render(arguments.project)
         return INVALID_OR_PREFLIGHT
