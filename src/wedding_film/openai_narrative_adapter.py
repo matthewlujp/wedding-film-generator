@@ -272,11 +272,7 @@ def _build_payload(
     reasoning_effort = parameters.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
     max_output_tokens = parameters.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
     store = parameters.get("store", DEFAULT_STORE)
-    context = json.dumps(
-        {"catalog_summary": request.catalog_summary, "participants": request.participants},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    context = json.dumps(request.context, ensure_ascii=False, sort_keys=True)
     return {
         "model": settings.model,
         "input": [

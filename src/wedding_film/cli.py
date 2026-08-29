@@ -13,6 +13,7 @@ from typing import Any, NoReturn, TextIO
 
 import yaml
 
+from wedding_film import script_generation
 from wedding_film.catalog import CatalogProblem, JsonObject, load_catalog, scan_catalog
 from wedding_film.catalog_review import (
     apply_correction,
@@ -641,6 +642,100 @@ def story_adopt(workspace: Path, force: bool, as_json: bool) -> int:
     return SUCCESS
 
 
+def _emit_script_narrative(
+    workspace: Path, code: str, message: str, *, stream: TextIO = sys.stdout
+) -> None:
+    print(
+        f"workspace={workspace} phase=script artifact=script.md code={code} message={message}",
+        file=stream,
+    )
+
+
+def _report_script_problem(workspace: Path, problem: NarrativeProblem, as_json: bool) -> int:
+    payload = {"state": "failed", "code": problem.code, "message": problem.message}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        _emit_script_narrative(workspace, problem.code, problem.message, stream=sys.stderr)
+    return INVALID_OR_PREFLIGHT
+
+
+def script_generate(workspace: Path, as_json: bool) -> int:
+    try:
+        candidate = script_generation.generate_candidate(workspace)
+    except NarrativeProblem as problem:
+        return _report_script_problem(workspace, problem, as_json)
+
+    markdown = script_generation.render_script_markdown(candidate)
+    try:
+        candidate_path = script_generation.write_candidate_file(workspace, markdown)
+    except NarrativeProblem as problem:
+        return _report_script_problem(workspace, problem, as_json)
+
+    story_path = workspace / "story.md"
+    _, diagnostics, _ = validate_script(candidate_path, story_path)
+    script_path = workspace / "script.md"
+    existing = script_path.is_file() and not script_path.is_symlink()
+
+    if diagnostics:
+        payload = {
+            "state": "candidate-invalid",
+            "candidate": str(candidate_path),
+            "diagnostics": diagnostics,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"candidate={candidate_path} state=candidate-invalid")
+            for item in diagnostics:
+                print(
+                    f"  code={item['code']} location={item['location']} "
+                    f"message={item['message']}"
+                )
+        return INVALID_OR_PREFLIGHT
+
+    if existing:
+        differences = script_generation.diff_summary(workspace, candidate)
+        payload = {
+            "state": "candidate-differs",
+            "candidate": str(candidate_path),
+            "script": str(script_path),
+            "differences": differences,
+        }
+        if as_json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"candidate={candidate_path} state=candidate-differs script={script_path}")
+            if differences:
+                for line in differences:
+                    print(f"  difference: {line}")
+            else:
+                print("  difference: candidate is textually equivalent to script.md")
+            print(f"  next=wedding-film --project {workspace} script adopt --force")
+        return INVALID_OR_PREFLIGHT
+
+    payload = {"state": "candidate-ready", "candidate": str(candidate_path)}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"candidate={candidate_path} state=candidate-ready")
+        print(f"  next=wedding-film --project {workspace} script adopt")
+    return SUCCESS
+
+
+def script_adopt(workspace: Path, force: bool, as_json: bool) -> int:
+    try:
+        script_path = script_generation.adopt_candidate(workspace, force=force)
+    except NarrativeProblem as problem:
+        return _report_script_problem(workspace, problem, as_json)
+    payload = {"state": "adopted", "script": str(script_path)}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"script={script_path} state=adopted")
+    return SUCCESS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = CliParser(prog="wedding-film")
     parser.add_argument("--project", type=Path, required=True, help="explicit Project Workspace")
@@ -738,6 +833,11 @@ def build_parser() -> argparse.ArgumentParser:
     script_validate = script_commands.add_parser("validate")
     script_validate.add_argument("--json", action="store_true", dest="as_json")
     script_validate.add_argument("--strict", action="store_true")
+    script_generate_parser = script_commands.add_parser("generate")
+    script_generate_parser.add_argument("--json", action="store_true", dest="as_json")
+    script_adopt_parser = script_commands.add_parser("adopt")
+    script_adopt_parser.add_argument("--force", action="store_true")
+    script_adopt_parser.add_argument("--json", action="store_true", dest="as_json")
     storyboard = commands.add_parser("storyboard")
     storyboard_commands = storyboard.add_subparsers(dest="storyboard_command", required=True)
     storyboard_validate = storyboard_commands.add_parser("validate")
@@ -839,6 +939,10 @@ def main(argv: list[str] | None = None) -> int:
             return story_adopt(arguments.project, arguments.force, arguments.as_json)
         if arguments.command == "script" and arguments.script_command == "validate":
             return write_script_validation(arguments.project, arguments.as_json, arguments.strict)
+        if arguments.command == "script" and arguments.script_command == "generate":
+            return script_generate(arguments.project, arguments.as_json)
+        if arguments.command == "script" and arguments.script_command == "adopt":
+            return script_adopt(arguments.project, arguments.force, arguments.as_json)
         if arguments.command == "storyboard" and arguments.storyboard_command == "validate":
             return write_storyboard_validation(
                 arguments.project, arguments.as_json, arguments.strict
