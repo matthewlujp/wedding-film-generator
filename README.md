@@ -17,6 +17,20 @@ uv run wedding-film --project projects/example status
 uv run wedding-film --project projects/example status --json
 ```
 
+### Credentials
+
+Adapters read their API keys from the process environment only; nothing in the pipeline
+opens a credentials file. Copy `.env.example` to `.env`, fill in the keys your configured
+adapters need, and let [`direnv`](https://direnv.net/) export them:
+
+```sh
+cp .env.example .env
+direnv allow
+uv run wedding-film --project projects/example status --json  # prerequisites.credentials
+```
+
+`.env` is untracked. Without direnv, export the variables yourself or prefix the command.
+
 Initialization accepts a nonexistent destination or an existing empty directory. It creates `project.yaml`, `participants.yaml`, `runs/analysis/`, `.work/candidates/`, and `renders/`. It deliberately does not create `materials/`; that directory and every Original Asset inside it remain user-managed.
 
 `catalog scan` recursively reads regular files in `materials/`, rejects symlinks, and writes a deterministic content-addressed `catalog.jsonl`. Byte-identical files share one record with multiple project-relative locators. Rescans preserve valid enrichment for unchanged content and atomically publish only a complete, source-integrity-checked catalog; Original Assets are never changed.
