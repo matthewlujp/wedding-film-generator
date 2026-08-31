@@ -63,3 +63,6 @@ Thumbs.db
 .vscode/
 
 projects/*
+
+.claude/worktrees
+.codex/worktrees
