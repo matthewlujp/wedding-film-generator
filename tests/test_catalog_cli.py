@@ -56,6 +56,54 @@ def test_scan_catalogs_nested_duplicate_materials_without_modifying_them(
     assert catalog_status["reasons"][0]["code"] == "SEMANTIC_CATALOG_VALID"
 
 
+def test_scan_matches_duplicates_whose_directory_order_differs_from_path_order(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "prefix-project"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    # "2026.3" precedes "2026.3.21-23" as a directory name, while the full locators sort
+    # the other way because "." precedes "/".
+    (materials / "2026.3").mkdir(parents=True)
+    (materials / "2026.3.21-23").mkdir()
+    (materials / "2026.3" / "photo.jpg").write_bytes(b"privacy-safe-photo-a")
+    (materials / "2026.3.21-23" / "photo.jpg").write_bytes(b"privacy-safe-photo-a")
+
+    result = run_cli("--project", str(workspace), "catalog", "scan")
+
+    assert result.returncode == 0, result.stderr
+    assert "CATALOG_SCANNED" in result.stdout
+    record = json.loads((workspace / "catalog.jsonl").read_text(encoding="utf-8"))
+    assert record["locators"] == [
+        "materials/2026.3.21-23/photo.jpg",
+        "materials/2026.3/photo.jpg",
+    ]
+
+
+def test_scan_ignores_operating_system_metadata_without_deleting_it(tmp_path: Path) -> None:
+    workspace = tmp_path / "metadata-project"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    materials = workspace / "materials"
+    (materials / "ceremony").mkdir(parents=True)
+    (materials / "ceremony" / "first.jpg").write_bytes(b"privacy-safe-photo-a")
+    top_level = materials / ".DS_Store"
+    nested = materials / "ceremony" / ".DS_Store"
+    top_level.write_bytes(b"finder-metadata")
+    nested.write_bytes(b"finder-metadata")
+
+    result = run_cli("--project", str(workspace), "catalog", "scan")
+
+    assert result.returncode == 0, result.stderr
+    assert "catalog contains 1 Original Assets" in result.stdout
+    records = [
+        json.loads(line)
+        for line in (workspace / "catalog.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["locators"] for record in records] == [["materials/ceremony/first.jpg"]]
+    assert top_level.exists()
+    assert nested.exists()
+
+
 def test_rescan_tracks_content_and_preserves_current_record_history(tmp_path: Path) -> None:
     workspace = tmp_path / "changing-project"
     assert run_cli("--project", str(workspace), "project", "init").returncode == 0
