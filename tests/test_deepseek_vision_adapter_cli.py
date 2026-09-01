@@ -73,7 +73,7 @@ def _vision_event(workspace: Path) -> dict[str, object]:
 def test_default_settings_match_the_specified_launch_configuration() -> None:
     assert DEFAULT_MODEL == "deepseek-v4-flash-vision-exp"
     assert DEFAULT_REASONING_EFFORT == "low"
-    assert DEFAULT_MAX_OUTPUT_TOKENS == 800
+    assert DEFAULT_MAX_OUTPUT_TOKENS == 4000
     assert DEFAULT_IMAGE_DETAIL == "high"
     assert API_URL == "https://api.deepseek.com/responses"
 
@@ -100,7 +100,7 @@ def test_success_records_provenance_usage_settings_and_no_secrets(tmp_path: Path
     assert run["model"] == "stub-success"
     assert run["settings"]["parameters"] == {
         "reasoning_effort": "low",
-        "max_output_tokens": 800,
+        "max_output_tokens": 4000,
         "image_detail": "high",
     }
     run_file_text = (
@@ -113,6 +113,16 @@ def test_success_records_provenance_usage_settings_and_no_secrets(tmp_path: Path
     reused = run_cli("--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id)
     assert reused.returncode == 0
     assert "reused=1" in reused.stdout
+
+
+def test_unsorted_duplicate_arrays_are_normalized_before_checkpointing(tmp_path: Path) -> None:
+    workspace, asset_id = configured_workspace(tmp_path, model="stub-unsorted-array")
+
+    result = run_cli("--project", str(workspace), "catalog", "analyze", "--asset-id", asset_id)
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads((workspace / "catalog.jsonl").read_text(encoding="utf-8"))
+    assert record["inferences"]["mood"]["value"] == ["focused", "warm"]
 
 
 def test_missing_api_key_maps_to_authentication_failure(tmp_path: Path) -> None:

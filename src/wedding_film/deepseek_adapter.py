@@ -24,7 +24,9 @@ ADAPTER_VERSION = "1"
 
 DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
 DEFAULT_REASONING_EFFORT = "low"
-DEFAULT_MAX_OUTPUT_TOKENS = 800
+# Reasoning tokens are billed against this same cap, and a live pilot saw a single
+# image consume ~2600 of them before the JSON candidate; 800 truncated responses.
+DEFAULT_MAX_OUTPUT_TOKENS = 4000
 DEFAULT_IMAGE_DETAIL = "high"
 
 API_URL = "https://api.deepseek.com/responses"
@@ -41,6 +43,7 @@ STUB_MODEL_TOKEN_LIMIT = "stub-token-limit"
 STUB_MODEL_CONNECTION_ERROR = "stub-connection-error"
 STUB_MODEL_MALFORMED = "stub-malformed"
 STUB_MODEL_INSUFFICIENT_BALANCE = "stub-insufficient-balance"
+STUB_MODEL_UNSORTED_ARRAY = "stub-unsorted-array"
 
 _STUB_CANDIDATE: dict[str, Any] = {
     "description": {"value": "A couple exchanging vows outdoors", "confidence": 0.95},
@@ -167,6 +170,33 @@ class StubTransport:
                         "message": "Your account balance is not enough.",
                     }
                 },
+            )
+        if model == STUB_MODEL_UNSORTED_ARRAY:
+            unsorted_candidate = {
+                **_STUB_CANDIDATE,
+                "mood": {"value": ["warm", "focused", "warm"], "confidence": 0.9},
+            }
+            return TransportResponse(
+                status_code=200,
+                body={
+                    "id": "resp_stub_unsorted_array",
+                    "model": model,
+                    "status": "completed",
+                    "usage": {"input_tokens": 900, "output_tokens": 143, "total_tokens": 1043},
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(unsorted_candidate),
+                                }
+                            ],
+                        }
+                    ],
+                },
+                request_id="resp_stub_unsorted_array",
             )
         if model == STUB_MODEL_RATE_LIMITED:
             return TransportResponse(
@@ -326,6 +356,25 @@ def _usage(body: dict[str, Any]) -> dict[str, int]:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             usage[key] = value
     return usage
+
+
+def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Sort and dedupe string-array claim values.
+
+    DeepSeek's json_schema response_format does not enforce uniqueItems or the
+    schema's declared field order, unlike OpenAI's strict mode; the Semantic
+    Catalog requires string arrays to already be sorted and unique.
+    """
+    normalized: dict[str, Any] = {}
+    for key, claim in candidate.items():
+        value = claim.get("value") if isinstance(claim, dict) else None
+        if isinstance(claim, dict) and isinstance(value, list) and all(
+            isinstance(item, str) for item in value
+        ):
+            normalized[key] = {**claim, "value": sorted(set(value))}
+        else:
+            normalized[key] = claim
+    return normalized
 
 
 def _error_message(body: dict[str, Any], default: str) -> str:
@@ -494,7 +543,7 @@ class DeepSeekVisionAdapter:
         return AdapterSuccess(
             outcome="success",
             adapter_version=self.version,
-            candidate=candidate,
+            candidate=_normalize_candidate(candidate),
             usage=usage,
             provider_metadata=provider_metadata,
         )
