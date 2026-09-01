@@ -222,7 +222,7 @@ def test_generate_succeeds_with_an_empty_participant_roster_and_a_populated_one(
     assert populated_roster.returncode == 0, populated_roster.stdout
 
 
-def test_catalog_summary_consumes_effective_corrections_without_leaking_asset_identifiers(
+def test_catalog_summary_carries_locators_and_corrections_without_leaking_asset_ids(
     tmp_path: Path,
 ) -> None:
     workspace = configured_workspace(tmp_path, with_asset=True)
@@ -238,7 +238,7 @@ def test_catalog_summary_consumes_effective_corrections_without_leaking_asset_id
 
     summary = _catalog_summary(workspace)
 
-    assert summary == [{"wedding_moment": "ceremony"}]
+    assert summary == [{"wedding_moment": "ceremony", "locators": ["materials/asset.bin"]}]
     serialized = json.dumps(summary)
     assert asset_id not in serialized
 

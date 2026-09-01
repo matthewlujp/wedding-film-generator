@@ -98,8 +98,17 @@ def _catalog_summary(workspace: Path) -> list[dict[str, object]]:
             if item.present and target.startswith("/inferences/")
         }
         if entry:
+            # Photos routed through a messaging app arrive with no EXIF capture time, so the
+            # Materials paths the user chose are the only chronology and event labelling the
+            # narrative can follow. Ordering by them hands the adapter that sequence directly.
+            entry["locators"] = record["locators"]
             summary.append(entry)
-    summary.sort(key=lambda entry: json.dumps(entry, sort_keys=True, ensure_ascii=False))
+    summary.sort(
+        key=lambda entry: (
+            json.dumps(entry["locators"], ensure_ascii=False),
+            json.dumps(entry, sort_keys=True, ensure_ascii=False),
+        )
+    )
     return summary
 
 

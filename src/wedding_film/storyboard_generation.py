@@ -172,7 +172,15 @@ def _asset_context(records: list[JsonObject]) -> list[dict[str, object]]:
             for target, item in effective.items()
             if item.present and target.startswith("/inferences/")
         }
-        context.append({"asset_id": record["asset_id"], "inferences": inferences})
+        # Without an EXIF capture time the Materials path is the only signal for placing a
+        # photo in time, which the Storyboard needs to sequence shots.
+        context.append(
+            {
+                "asset_id": record["asset_id"],
+                "locators": record["locators"],
+                "inferences": inferences,
+            }
+        )
     return context
 
 

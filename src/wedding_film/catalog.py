@@ -25,6 +25,11 @@ RFC3339_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
 )
 
+# Filesystem metadata the operating system writes into the user's own Materials. Enrolling
+# it would make every extract run report a permanent decode failure and would reserve
+# analysis budget that failures never refund, starving real photos.
+IGNORED_MATERIAL_NAMES = frozenset({".DS_Store"})
+
 TOP_LEVEL_KEYS = (
     "schema_version",
     "asset_id",
@@ -611,6 +616,8 @@ def _scan_materials(workspace: Path) -> ScannedAssets:
             raise _problem("MATERIALS_IO_ERROR", "Materials could not be scanned") from error
         for entry in entries:
             path = Path(entry.path)
+            if entry.name in IGNORED_MATERIAL_NAMES:
+                continue
             try:
                 if entry.is_symlink():
                     raise _problem(
@@ -645,7 +652,13 @@ def _scan_materials(workspace: Path) -> ScannedAssets:
                 existing[1].append(locator)
 
     visit(materials)
-    return assets
+    # Catalog records hold locators sorted and deduplicated, and the manifest is compared
+    # against those records, so both sides are normalized here at their single origin.
+    # Directory-order traversal alone would order "2026.3/x" before "2026.3.21-23/x".
+    return {
+        digest: (byte_size, sorted(set(locators)))
+        for digest, (byte_size, locators) in assets.items()
+    }
 
 
 def inspect_materials(workspace: Path) -> MaterialsManifest:
@@ -654,7 +667,7 @@ def inspect_materials(workspace: Path) -> MaterialsManifest:
         {
             "asset_id": f"sha256:{digest}",
             "byte_size": byte_size,
-            "locators": sorted(set(locators)),
+            "locators": locators,
         }
         for digest, (byte_size, locators) in sorted(assets.items())
     ]
