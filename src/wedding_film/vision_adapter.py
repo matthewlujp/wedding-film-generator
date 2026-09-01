@@ -220,4 +220,8 @@ def adapter_for(name: str) -> VisionAdapter:
         from wedding_film.openai_adapter import OpenAIVisionAdapter
 
         return OpenAIVisionAdapter()
+    if name == "deepseek":
+        from wedding_film.deepseek_adapter import DeepSeekVisionAdapter
+
+        return DeepSeekVisionAdapter()
     raise ValueError(f"vision adapter {name!r} cannot analyze assets")
