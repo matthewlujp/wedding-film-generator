@@ -15,6 +15,7 @@ ADAPTERS: dict[str, AdapterDefinition] = {
         AdapterDefinition("none"),
         AdapterDefinition("fake"),
         AdapterDefinition("openai", ("OPENAI_API_KEY",)),
+        AdapterDefinition("deepseek", ("DEEPSEEK_API_KEY",)),
     )
 }
 

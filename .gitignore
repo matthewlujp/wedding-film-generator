@@ -21,7 +21,6 @@ htmlcov/
 venv/
 env/
 ENV/
-.envrc
 build/
 dist/
 *.egg-info/
