@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from test_script_cli import write_skipped_interview
 
 from wedding_film.story_generation import _catalog_summary
 
@@ -31,6 +32,7 @@ def configured_workspace(
     if with_asset:
         (materials / "asset.bin").write_bytes(b"asset bytes for effective corrections test")
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    write_skipped_interview(workspace)
     return workspace
 
 

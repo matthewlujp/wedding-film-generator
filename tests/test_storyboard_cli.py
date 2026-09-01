@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_script_cli import valid_script, valid_story
+from test_script_cli import valid_script, valid_story, write_skipped_interview
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -66,6 +66,7 @@ def authored_workspace(tmp_path: Path) -> tuple[Path, str]:
     photo = materials / "photo.jpg"
     photo.write_bytes(b"photo")
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    write_skipped_interview(workspace)
     catalog = (workspace / "catalog.jsonl").read_text()
     asset_id = json.loads(catalog)["asset_id"]
     story = valid_story()

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from test_script_cli import write_skipped_interview
 
 from wedding_film.openai_narrative_adapter import API_URL, DEFAULT_MODEL, DEFAULT_STORE
 
@@ -40,6 +41,7 @@ def configured_workspace(tmp_path: Path, *, model: str) -> Path:
     )
     (workspace / "materials").mkdir()
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    write_skipped_interview(workspace)
     return workspace
 
 

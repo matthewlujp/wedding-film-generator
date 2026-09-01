@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 from PIL import Image
+from test_script_cli import write_skipped_interview
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -51,6 +52,7 @@ def configured_workspace(
             materials / f"photo-{index}.jpg"
         )
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    write_skipped_interview(workspace)
     if with_story:
         assert run_cli(
             "--project", str(workspace), "story", "generate", "--json"
