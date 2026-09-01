@@ -90,5 +90,5 @@ partial failures, provider usage and estimated cost when a provider command ran,
 states from the rerun status, and one next gate. When the interview layer is not yet `ready`,
 report which required sections remain open or skipped, and how many recommended-section gaps
 `interview.md`'s gap-finding step surfaced, without pretending the count is a completion criterion.
-Keep credential values and private Material contents — and anything the couple asked to keep out of
-the film, or out of each other's hearing — out of the report.
+Keep credential values, private Material contents, and anything the couple asked to keep out of the
+film out of the report.

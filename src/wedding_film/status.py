@@ -359,7 +359,7 @@ def _interview_fact(workspace: Path, catalog_path: Path, catalog: Fact) -> Fact:
     )
     if preflight is not None and preflight["state"] != "stale":
         return preflight
-    diagnostics = validate_interview(artifact)
+    diagnostics = validate_interview(workspace)
     if diagnostics:
         problem = diagnostics[0]
         return _fact(

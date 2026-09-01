@@ -8,6 +8,7 @@ The pipeline is:
 
 original assets
 → semantic catalog
+→ interview
 → story
 → script
 → storyboard
@@ -19,6 +20,8 @@ Never collapse these layers.
 
 - Original photos are immutable.
 - Semantic catalog is the source of truth for asset metadata.
+- interview/transcript.md is the source of truth for what the couple said, verbatim.
+- interview/brief.yaml is the source of truth for structured couple/wedding context.
 - story.md is the source of truth for narrative intent.
 - script.md is the source of truth for narrative text.
 - storyboard.yaml is the source of truth for concrete movie composition.

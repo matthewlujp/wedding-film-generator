@@ -173,3 +173,50 @@ def test_excluded_asset_ids_reads_constraints_from_a_full_brief(tmp_path: Path) 
     brief = load_brief(workspace / "interview" / "brief.yaml")
     assert unmet_required_sections(brief) == []
     assert excluded_asset_ids(brief) == {"sha256:" + "0" * 64}
+
+
+def test_validate_rejects_a_people_entry_referencing_an_unknown_participant(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "unknown-participant"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    document = skip_all_required()
+    document["people"] = [
+        {
+            "participant_id": "nobody-registered",
+            "relationship": "friend",
+            "called_as": "Sam",
+            "anecdotes": [],
+        }
+    ]
+    write_brief(workspace, document)
+
+    result = run_cli("--project", str(workspace), "interview", "validate", "--json")
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["diagnostics"][0]["code"] == "INTERVIEW_UNKNOWN_PARTICIPANT"
+
+
+def test_validate_accepts_a_people_entry_referencing_a_registered_participant(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "known-participant"
+    assert run_cli("--project", str(workspace), "project", "init").returncode == 0
+    assert run_cli(
+        "--project", str(workspace), "participant", "add", "--id", "sam-lee",
+    ).returncode == 0
+    document = skip_all_required()
+    document["people"] = [
+        {
+            "participant_id": "sam-lee",
+            "relationship": "friend",
+            "called_as": "Sam",
+            "anecdotes": [],
+        }
+    ]
+    write_brief(workspace, document)
+
+    result = run_cli("--project", str(workspace), "interview", "validate", "--json")
+
+    assert result.returncode == 0, result.stdout

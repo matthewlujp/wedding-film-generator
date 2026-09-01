@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from wedding_film.catalog import PARTICIPANT_ID_PATTERN
+from wedding_film.participants import ParticipantProblem, load_participants
 from wedding_film.story import Diagnostic, DuplicateFieldError, StrictLoader
 
 SCHEMA_VERSION = 1
@@ -411,9 +412,24 @@ def unmet_required_sections(brief: Brief) -> list[str]:
     ]
 
 
+def _check_participant_references(workspace: Path, brief: Brief) -> None:
+    try:
+        known_ids = {participant.id for participant in load_participants(workspace)}
+    except ParticipantProblem:
+        return
+    for index, person in enumerate(brief.people):
+        if person.participant_id not in known_ids:
+            raise _problem(
+                "INTERVIEW_UNKNOWN_PARTICIPANT",
+                f"$.people[{index}].participant_id references unknown participant "
+                f"{person.participant_id!r}",
+            )
+
+
 def load_effective_brief(workspace: Path) -> Brief:
     """Load the interview brief, raising unless every required section is present or skipped."""
     brief = load_brief(workspace / "interview" / "brief.yaml")
+    _check_participant_references(workspace, brief)
     unmet = unmet_required_sections(brief)
     if unmet:
         raise _problem(
@@ -496,9 +512,11 @@ def _diagnostic(path: Path, code: str, location: str, message: str) -> Diagnosti
     return {"artifact": str(path), "code": code, "location": location, "message": message}
 
 
-def validate_interview(path: Path) -> list[Diagnostic]:
+def validate_interview(workspace: Path) -> list[Diagnostic]:
+    path = workspace / "interview" / "brief.yaml"
     try:
         brief = load_brief(path)
+        _check_participant_references(workspace, brief)
     except InterviewProblem as problem:
         return [_diagnostic(path, problem.code, "$", problem.message)]
     unmet = unmet_required_sections(brief)
@@ -516,7 +534,7 @@ def validate_interview(path: Path) -> list[Diagnostic]:
 
 def write_interview_validation(workspace: Path, as_json: bool) -> int:
     path = workspace / "interview" / "brief.yaml"
-    diagnostics = validate_interview(path)
+    diagnostics = validate_interview(workspace)
     payload = {
         "artifact": str(path),
         "state": "invalid" if diagnostics else "ready",
