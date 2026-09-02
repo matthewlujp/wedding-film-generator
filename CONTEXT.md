@@ -89,6 +89,25 @@ A human-authored replacement or suppression of a catalog value. A Correction
 takes precedence when the catalog is consumed without erasing the earlier
 Observation or Inference.
 
+### Interview
+
+The conversational phase, between Semantic Catalog and Story, that captures what
+the couple says about themselves, their wedding, and their wishes for the movie
+that no photo can supply. It produces an Interview Transcript and an Interview
+Brief and is conducted by the agent, not the CLI.
+
+### Interview Transcript
+
+The verbatim, append-only record of the Interview, in the couple's own words. It
+is a human-authored primary source, never rewritten or summarized in place.
+
+### Interview Brief
+
+The structured extraction of the Interview Transcript that Story, Script, and
+Storyboard generation consume. Its required sections (couple, wedding, film,
+constraints) must each be answered or explicitly recorded as skipped before
+generation may proceed; its recommended sections may remain open indefinitely.
+
 ### Story
 
 The narrative intent of the wedding movie: its target runtime, emotional arc,

@@ -150,6 +150,7 @@ def test_human_and_json_status_render_the_same_workspace_facts(tmp_path: Path) -
     assert set(payload["layers"]) == {
         "materials",
         "semantic_catalog",
+        "interview",
         "story",
         "script",
         "storyboard",
@@ -322,6 +323,6 @@ def test_status_json_reports_artifact_io_errors_without_a_traceback(
     assert returncode == 1
     assert "Traceback" not in captured.err
     assert payload["state"] == "invalid"
-    assert payload["layers"]["story"]["state"] == "invalid"
-    assert payload["layers"]["story"]["reasons"][0]["code"] == "STORY_IO_ERROR"
-    assert payload["layers"]["story"]["artifacts"] == [str(catalog)]
+    assert payload["layers"]["interview"]["state"] == "invalid"
+    assert payload["layers"]["interview"]["reasons"][0]["code"] == "INTERVIEW_IO_ERROR"
+    assert payload["layers"]["interview"]["artifacts"] == [str(catalog)]

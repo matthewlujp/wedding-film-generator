@@ -14,6 +14,7 @@ import yaml
 from wedding_film.catalog import CatalogProblem, JsonObject, load_catalog
 from wedding_film.catalog_review import effective_values
 from wedding_film.config import ConfigProblem, load_project_config
+from wedding_film.interview import InterviewProblem, excluded_asset_ids, load_effective_brief
 from wedding_film.narrative_adapter import (
     AdapterFailure,
     AdapterSettings,
@@ -474,6 +475,13 @@ def generate_candidate(workspace: Path) -> StoryboardCandidate:
     except CatalogProblem as problem:
         raise _problem(problem.code, problem.message) from problem
 
+    try:
+        brief = load_effective_brief(workspace)
+    except InterviewProblem as problem:
+        raise _problem(problem.code, problem.message) from problem
+    excluded = excluded_asset_ids(brief)
+    available_records = [record for record in records if record["asset_id"] not in excluded]
+
     story_document = load_story_document(story_path)
     request = NarrativeRequest(
         context={
@@ -493,7 +501,7 @@ def generate_candidate(workspace: Path) -> StoryboardCandidate:
                     for block in script_document["blocks"]
                 ],
             },
-            "assets": _asset_context(records),
+            "assets": _asset_context(available_records),
         }
     )
     settings = AdapterSettings(

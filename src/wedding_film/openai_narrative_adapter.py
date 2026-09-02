@@ -42,7 +42,6 @@ STUB_MODEL_MALFORMED = "stub-malformed"
 
 _STUB_CANDIDATE: dict[str, Any] = {
     "title": "Stub Wedding Story",
-    "target_duration_seconds": 300,
     "intent": "Celebrate the couples day with their family and friends.",
     "emotional_arc": "From calm preparation to shared joy.",
     "moments": [

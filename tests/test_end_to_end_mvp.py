@@ -12,6 +12,8 @@ import yaml
 from PIL import Image
 from test_render_cli import probe
 
+BRIEF_TARGET_DURATION_SECONDS = 240
+
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     executable = Path(sys.executable).with_name("wedding-film")
@@ -57,6 +59,46 @@ def build_seeded_workspace(
             materials / f"photo-{index}.jpg"
         )
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    interview_dir = workspace / "interview"
+    interview_dir.mkdir()
+    (interview_dir / "brief.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "couple": {
+                    "partner_a": {"name": "Jane Doe", "called_as": "Jane"},
+                    "partner_b": {"name": "Alex Chen", "called_as": "Alex"},
+                    "first_met": "at a mutual friend's birthday party",
+                    "relationship_years": 4,
+                    "proposal": "on a hike at sunrise",
+                    "turning_point": "moving in together during the pandemic",
+                },
+                "wedding": {
+                    "date": "2026-11-01",
+                    "venue": "Lakeside Hall",
+                    "ceremony_style": "casual outdoor ceremony",
+                    "guests": "close family and friends, about 60 people",
+                    "screening_moment": "reception, after dinner",
+                },
+                "film": {
+                    "target_duration_seconds": BRIEF_TARGET_DURATION_SECONDS,
+                    "audience": "family and friends at the reception",
+                    "tone_wanted": "warm and a little funny",
+                    "tone_avoided": "overly sentimental",
+                    "music": "acoustic guitar",
+                },
+                "constraints": {
+                    "forbidden_topics": [],
+                    "excluded_people": [],
+                    "excluded_materials": [],
+                    "notes": "keep it light",
+                },
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
     records = sorted(catalog_records(workspace), key=lambda record: record["locators"][0])
     asset_ids = [record["asset_id"] for record in records]
     return workspace, asset_ids
@@ -101,6 +143,10 @@ def test_full_pipeline_completes_through_the_public_cli_with_preserved_asset_has
 
     assert run_cli("--project", str(workspace), "story", "generate", "--json").returncode == 0
     assert run_cli("--project", str(workspace), "story", "adopt", "--json").returncode == 0
+    story_frontmatter = yaml.safe_load(
+        (workspace / "story.md").read_text(encoding="utf-8").split("---")[1]
+    )
+    assert story_frontmatter["target_duration_seconds"] == BRIEF_TARGET_DURATION_SECONDS
     assert run_cli("--project", str(workspace), "script", "generate", "--json").returncode == 0
     assert run_cli("--project", str(workspace), "script", "adopt", "--json").returncode == 0
     assert run_cli("--project", str(workspace), "storyboard", "generate", "--json").returncode == 0

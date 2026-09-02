@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import tempfile
@@ -14,6 +13,13 @@ import yaml
 from wedding_film.catalog import CatalogProblem, load_catalog
 from wedding_film.catalog_review import effective_values
 from wedding_film.config import ConfigProblem, load_project_config
+from wedding_film.interview import (
+    DEFAULT_TARGET_DURATION_SECONDS,
+    Brief,
+    InterviewProblem,
+    load_effective_brief,
+    narrative_summary,
+)
 from wedding_film.narrative_adapter import (
     AdapterFailure,
     AdapterSettings,
@@ -26,17 +32,18 @@ from wedding_film.participants import ParticipantProblem, load_participants
 from wedding_film.story import load_story_document, validate_story
 
 PROMPT = (
-    "Using only the provided effective Semantic Catalog summary and Participant roster, "
-    "produce a Story candidate for a wedding film: a title, a positive target_duration_seconds, "
-    "an intent (prose describing the narrative intent), an emotional_arc (prose describing the "
-    "emotional journey), and an ordered list of Story Moments, each with a lowercase kebab-case "
-    "id and non-empty prose. Never reference Original Assets, Asset Locators, filenames, or "
-    "specific frame or time values; describe narrative intent only."
+    "Using only the provided effective Semantic Catalog summary, Participant roster, and "
+    "Interview summary of what the couple said about themselves, produce a Story candidate "
+    "for a wedding film: a title, an intent (prose describing the narrative intent), an "
+    "emotional_arc (prose describing the emotional journey), and an ordered list of Story "
+    "Moments, each with a lowercase kebab-case id and non-empty prose. Never reference "
+    "Original Assets, Asset Locators, filenames, or specific frame or time values; describe "
+    "narrative intent only."
 )
 OUTPUT_SCHEMA_VERSION = "story-candidate-v1"
 CANDIDATE_RELATIVE_PATH = Path(".work") / "candidates" / "story.candidate.md"
 _MOMENT_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-_CANDIDATE_FIELDS = {"title", "target_duration_seconds", "intent", "emotional_arc", "moments"}
+_CANDIDATE_FIELDS = {"title", "intent", "emotional_arc", "moments"}
 
 
 class NarrativeProblem(Exception):
@@ -60,14 +67,13 @@ class StoryCandidate:
 
 
 def _schema() -> OutputSchema:
-    fields = ("title", "target_duration_seconds", "intent", "emotional_arc", "moments")
+    fields = ("title", "intent", "emotional_arc", "moments")
     definition: dict[str, object] = {
         "type": "object",
         "required": list(fields),
         "additionalProperties": False,
         "properties": {
             "title": {"type": "string"},
-            "target_duration_seconds": {"type": "number"},
             "intent": {"type": "string"},
             "emotional_arc": {"type": "string"},
             "moments": {
@@ -128,7 +134,20 @@ def _participant_context(workspace: Path) -> list[dict[str, object]]:
     ]
 
 
-def _normalize_candidate(payload: object) -> StoryCandidate:
+def _interview_context(workspace: Path) -> Brief:
+    try:
+        return load_effective_brief(workspace)
+    except InterviewProblem as problem:
+        raise _problem(problem.code, problem.message) from problem
+
+
+def _target_duration_seconds(brief: Brief) -> float:
+    if brief.film is not None:
+        return brief.film.target_duration_seconds
+    return DEFAULT_TARGET_DURATION_SECONDS
+
+
+def _normalize_candidate(payload: object, *, target_duration_seconds: float) -> StoryCandidate:
     if not isinstance(payload, dict):
         raise _problem("NARRATIVE_CANDIDATE_INVALID", "candidate must be a JSON object")
     if set(payload) != _CANDIDATE_FIELDS:
@@ -136,22 +155,11 @@ def _normalize_candidate(payload: object) -> StoryCandidate:
             "NARRATIVE_CANDIDATE_INVALID", "candidate must contain exactly the expected fields"
         )
     title = payload["title"]
-    duration = payload["target_duration_seconds"]
     intent = payload["intent"]
     arc = payload["emotional_arc"]
     moments = payload["moments"]
     if not isinstance(title, str) or not title.strip():
         raise _problem("NARRATIVE_CANDIDATE_INVALID", "candidate title must be a non-empty string")
-    if (
-        isinstance(duration, bool)
-        or not isinstance(duration, int | float)
-        or duration <= 0
-        or not math.isfinite(duration)
-    ):
-        raise _problem(
-            "NARRATIVE_CANDIDATE_INVALID",
-            "candidate target_duration_seconds must be a positive finite number",
-        )
     if not isinstance(intent, str) or not intent.strip():
         raise _problem("NARRATIVE_CANDIDATE_INVALID", "candidate intent must be a non-empty string")
     if not isinstance(arc, str) or not arc.strip():
@@ -184,7 +192,7 @@ def _normalize_candidate(payload: object) -> StoryCandidate:
         normalized_moments.append((moment_id, prose))
     return StoryCandidate(
         title=title,
-        target_duration_seconds=float(duration),
+        target_duration_seconds=target_duration_seconds,
         intent=intent,
         emotional_arc=arc,
         moments=tuple(normalized_moments),
@@ -242,8 +250,13 @@ def generate_candidate(workspace: Path) -> StoryCandidate:
     except CatalogProblem as problem:
         raise _problem(problem.code, problem.message) from problem
     participants = _participant_context(workspace)
+    brief = _interview_context(workspace)
     request = NarrativeRequest(
-        context={"catalog_summary": catalog_summary, "participants": participants}
+        context={
+            "catalog_summary": catalog_summary,
+            "participants": participants,
+            "interview": narrative_summary(brief),
+        }
     )
     settings = AdapterSettings(
         model=config.narrative.model,
@@ -274,7 +287,9 @@ def generate_candidate(workspace: Path) -> StoryCandidate:
         )
         raise _problem(code, response.message)
     assert isinstance(response, AdapterSuccess)
-    return _normalize_candidate(response.candidate)
+    return _normalize_candidate(
+        response.candidate, target_duration_seconds=_target_duration_seconds(brief)
+    )
 
 
 def write_candidate_file(workspace: Path, markdown: str) -> Path:

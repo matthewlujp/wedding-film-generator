@@ -16,6 +16,7 @@ from wedding_film.config import (
     ProjectConfig,
     load_project_config,
 )
+from wedding_film.interview import validate_interview
 from wedding_film.script import validate_script
 from wedding_film.story import validate_story
 from wedding_film.storyboard import parse_storyboard, validate_storyboard
@@ -346,6 +347,41 @@ def _catalog_fact(workspace: Path, materials: Fact) -> Fact:
     )
 
 
+def _interview_fact(workspace: Path, catalog_path: Path, catalog: Fact) -> Fact:
+    artifact = workspace / "interview" / "brief.yaml"
+    hashes, hash_error = _current_hashes(
+        {"semantic_catalog": catalog_path}, "INTERVIEW", "interview"
+    )
+    if hash_error is not None:
+        return hash_error
+    preflight = _artifact_preflight(
+        artifact, "INTERVIEW", "interview", {"semantic_catalog": catalog}, hashes
+    )
+    if preflight is not None and preflight["state"] != "stale":
+        return preflight
+    diagnostics = validate_interview(workspace)
+    if diagnostics:
+        problem = diagnostics[0]
+        return _fact(
+            "invalid",
+            problem["code"],
+            f"location={problem['location']} {problem['message']}",
+            [str(artifact)],
+            phase="interview",
+            upstream_hashes=hashes,
+        )
+    if preflight is not None:
+        return preflight
+    return _fact(
+        "ready",
+        "INTERVIEW_VALID",
+        "interview brief satisfies every required section",
+        [str(artifact)],
+        phase="interview",
+        upstream_hashes=hashes,
+    )
+
+
 def _story_fact(workspace: Path, dependencies: dict[str, tuple[Path, Fact]]) -> Fact:
     artifact = workspace / "story.md"
     hashes, hash_error = _current_hashes(
@@ -446,6 +482,8 @@ def _storyboard_fact(
     workspace: Path,
     catalog_path: Path,
     catalog: Fact,
+    interview_path: Path,
+    interview: Fact,
     story_path: Path,
     story: Fact,
     script_path: Path,
@@ -454,6 +492,7 @@ def _storyboard_fact(
     artifact = workspace / "storyboard.yaml"
     dependencies = {
         "semantic_catalog": (catalog_path, catalog),
+        "interview": (interview_path, interview),
         "story": (story_path, story),
         "script": (script_path, script),
     }
@@ -657,20 +696,24 @@ def derive_status(workspace: Path) -> StatusPayload:
     credentials = _credentials_fact(config)
 
     catalog_path = workspace / "catalog.jsonl"
+    interview_path = workspace / "interview" / "brief.yaml"
     story_path = workspace / "story.md"
     script_path = workspace / "script.md"
     storyboard_path = workspace / "storyboard.yaml"
     materials = _materials_fact(workspace)
     catalog = _catalog_fact(workspace, materials)
+    interview = _interview_fact(workspace, catalog_path, catalog)
     story = _story_fact(
         workspace,
-        {"semantic_catalog": (catalog_path, catalog)},
+        {"interview": (interview_path, interview)},
     )
     script = _script_fact(workspace, story_path, story)
     storyboard = _storyboard_fact(
         workspace,
         catalog_path,
         catalog,
+        interview_path,
+        interview,
         story_path,
         story,
         script_path,
@@ -686,6 +729,7 @@ def derive_status(workspace: Path) -> StatusPayload:
     layers = {
         "materials": materials,
         "semantic_catalog": catalog,
+        "interview": interview,
         "story": story,
         "script": script,
         "storyboard": storyboard,

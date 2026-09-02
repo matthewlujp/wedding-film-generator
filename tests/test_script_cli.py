@@ -12,6 +12,21 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([str(executable), *args], check=False, capture_output=True, text=True)
 
 
+def write_skipped_interview(workspace: Path) -> None:
+    """Record every required Interview section as explicitly skipped for this fixture."""
+    interview_dir = workspace / "interview"
+    interview_dir.mkdir(exist_ok=True)
+    (interview_dir / "brief.yaml").write_text(
+        "schema_version: 1\n"
+        "skipped_sections:\n"
+        "  - {section: couple, reason: test fixture, actor: test}\n"
+        "  - {section: wedding, reason: test fixture, actor: test}\n"
+        "  - {section: film, reason: test fixture, actor: test}\n"
+        "  - {section: constraints, reason: test fixture, actor: test}\n",
+        encoding="utf-8",
+    )
+
+
 def valid_story() -> str:
     return """---
 schema_version: 1
@@ -376,6 +391,7 @@ def test_status_reports_ready_and_stale_script_against_story_bytes(tmp_path: Pat
     assert run_cli("--project", str(workspace), "project", "init").returncode == 0
     (workspace / "materials").mkdir()
     assert run_cli("--project", str(workspace), "catalog", "scan").returncode == 0
+    write_skipped_interview(workspace)
     story = valid_story()
     story_path = workspace / "story.md"
     story_path.write_text(story, encoding="utf-8")

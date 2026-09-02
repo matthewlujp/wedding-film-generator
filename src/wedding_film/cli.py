@@ -24,6 +24,7 @@ from wedding_film.catalog_review import (
     storyboard_referenced_assets,
 )
 from wedding_film.exif import extract_exif
+from wedding_film.interview import write_interview_validation
 from wedding_film.participants import (
     UNSET,
     Participant,
@@ -931,6 +932,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate")
     validate.add_argument("--json", action="store_true", dest="as_json")
     validate.add_argument("--strict", action="store_true")
+    interview = commands.add_parser("interview")
+    interview_commands = interview.add_subparsers(dest="interview_command", required=True)
+    interview_validate = interview_commands.add_parser("validate")
+    interview_validate.add_argument("--json", action="store_true", dest="as_json")
     story = commands.add_parser("story")
     story_commands = story.add_subparsers(dest="story_command", required=True)
     story_validate = story_commands.add_parser("validate")
@@ -1048,6 +1053,8 @@ def main(argv: list[str] | None = None) -> int:
             return write_status(arguments.project, arguments.as_json)
         if arguments.command == "validate":
             return write_validation(arguments.project, arguments.as_json, arguments.strict)
+        if arguments.command == "interview" and arguments.interview_command == "validate":
+            return write_interview_validation(arguments.project, arguments.as_json)
         if arguments.command == "story" and arguments.story_command == "validate":
             return write_story_validation(arguments.project, arguments.as_json)
         if arguments.command == "story" and arguments.story_command == "generate":

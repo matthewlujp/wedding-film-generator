@@ -10,6 +10,7 @@ import yaml
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 from wedding_film.catalog import CatalogProblem, validate_catalog
+from wedding_film.interview import Brief, InterviewProblem, excluded_asset_ids, load_brief
 from wedding_film.script import ScriptDocument, WarningMessage, validate_script
 from wedding_film.story import (
     Diagnostic,
@@ -521,8 +522,51 @@ def validate_storyboard(
                     "Semantic Catalog cross-reference validation is unavailable",
                 )
             )
+    excluded: set[str] = set()
+    if workspace is not None:
+        interview_path = workspace / "interview" / "brief.yaml"
+        try:
+            brief: Brief | None = load_brief(interview_path)
+        except InterviewProblem as problem:
+            if require_catalog_integrity and interview_path.exists():
+                return (
+                    document,
+                    [
+                        _diagnostic(
+                            storyboard_path,
+                            problem.code,
+                            "$.inputs.interview",
+                            problem.message,
+                        )
+                    ],
+                    [],
+                )
+            brief = None
+            warnings.append(
+                _warning(
+                    storyboard_path,
+                    "STORYBOARD_INTERVIEW_UNAVAILABLE",
+                    "$.inputs.interview",
+                    "Interview constraint cross-reference validation is unavailable",
+                )
+            )
+        if brief is not None:
+            excluded = excluded_asset_ids(brief)
     for index, item in enumerate(document["sequence"]):
         location = f"$.sequence[{index}]"
+        if item["type"] == "photo" and item["asset_id"] in excluded:
+            return (
+                document,
+                [
+                    _diagnostic(
+                        storyboard_path,
+                        "STORYBOARD_EXCLUDED_ASSET",
+                        f"{location}.asset_id",
+                        f"asset_id {item['asset_id']} is excluded by the Interview brief",
+                    )
+                ],
+                [],
+            )
         if moments is not None and item["story_moment"] not in moments:
             return (
                 document,
@@ -638,7 +682,7 @@ def validate_storyboard(
             )
     if assets is not None:
         used_assets = {item["asset_id"] for item in document["sequence"] if item["type"] == "photo"}
-        unused_assets = sorted(assets - used_assets)
+        unused_assets = sorted(assets - excluded - used_assets)
         if unused_assets:
             warnings.append(
                 _warning(

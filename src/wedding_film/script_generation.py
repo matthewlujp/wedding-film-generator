@@ -12,6 +12,7 @@ from typing import Literal, cast
 import yaml
 
 from wedding_film.config import ConfigProblem, load_project_config
+from wedding_film.interview import InterviewProblem, load_effective_brief, narrative_summary
 from wedding_film.narrative_adapter import (
     AdapterFailure,
     AdapterSettings,
@@ -26,11 +27,14 @@ from wedding_film.story_generation import NarrativeProblem
 
 PROMPT = (
     "Using only the provided validated Story (its title and the prose of its Story "
-    "Moments), produce a Script candidate for a wedding film: a title and an ordered "
-    "list of Script Blocks, each with a lowercase kebab-case id, a type of narration, "
-    "card, or caption, a story_moment referencing an existing Story Moment id, and a "
-    "non-empty plain-Unicode body with no rich Markdown formatting. Never reference "
-    "Original Assets, Asset Locators, filenames, or specific frame or time values."
+    "Moments) and the Interview summary of what the couple said about themselves, "
+    "produce a Script candidate for a wedding film: a title and an ordered list of "
+    "Script Blocks, each with a lowercase kebab-case id, a type of narration, card, or "
+    "caption, a story_moment referencing an existing Story Moment id, and a non-empty "
+    "plain-Unicode body with no rich Markdown formatting. Prefer the couple's own "
+    "phrasing, nicknames, and anecdotes from the Interview summary where they fit "
+    "naturally, and never contradict its constraints. Never reference Original Assets, "
+    "Asset Locators, filenames, or specific frame or time values."
 )
 OUTPUT_SCHEMA_VERSION = "script-candidate-v1"
 CANDIDATE_RELATIVE_PATH = Path(".work") / "candidates" / "script.candidate.md"
@@ -211,10 +215,19 @@ def generate_candidate(workspace: Path) -> ScriptCandidate:
         )
         raise _problem(code, f"location={upstream['location']} {upstream['message']}")
 
+    try:
+        brief = load_effective_brief(workspace)
+    except InterviewProblem as problem:
+        raise _problem(problem.code, problem.message) from problem
+
     story_document = load_story_document(story_path)
     story_hash = "sha256:" + hashlib.sha256(story_path.read_bytes()).hexdigest()
     request = NarrativeRequest(
-        context={"title": story_document["title"], "moments": _story_moments(story_path)}
+        context={
+            "title": story_document["title"],
+            "moments": _story_moments(story_path),
+            "interview": narrative_summary(brief),
+        }
     )
     settings = AdapterSettings(
         model=config.narrative.model,

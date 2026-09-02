@@ -75,7 +75,6 @@ class NarrativeAdapter(Protocol):
 
 _FIXTURE_CANDIDATE: dict[str, object] = {
     "title": "Fixture Wedding Story",
-    "target_duration_seconds": 300,
     "intent": "Celebrate their day surrounded by the people who love them.",
     "emotional_arc": "From quiet anticipation to joyful, shared celebration.",
     "moments": [
@@ -86,7 +85,6 @@ _FIXTURE_CANDIDATE: dict[str, object] = {
 
 _FIXTURE_ALTERNATE_CANDIDATE: dict[str, object] = {
     "title": "Fixture Wedding Story, Revisited",
-    "target_duration_seconds": 360,
     "intent": "Celebrate their day surrounded by the people who love them, with more warmth.",
     "emotional_arc": "From nervous excitement to overflowing joy.",
     "moments": [
@@ -218,8 +216,6 @@ class FakeNarrativeAdapter:
             return {**_FIXTURE_CANDIDATE, "intent": "   "}
         if model == "fixture-invalid-formatting-only-intent":
             return {**_FIXTURE_CANDIDATE, "intent": "***"}
-        if model == "fixture-invalid-type":
-            return {**_FIXTURE_CANDIDATE, "target_duration_seconds": "not-a-number"}
         return dict(_FIXTURE_CANDIDATE)
 
     def _script_candidate(self, model: str) -> dict[str, object]:
